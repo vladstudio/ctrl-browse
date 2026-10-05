@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "ctrl-browse bridge",
+  "version": "1.0.0",
+  "description": "Bridge for the ctrl-browse CLI — drives tabs via chrome.debugger",
+  "minimum_chrome_version": "116",
+  "permissions": ["debugger", "tabs", "tabGroups", "alarms"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js" }
+}
