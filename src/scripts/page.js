@@ -20,12 +20,17 @@ function (opts) {
       if (el.type === 'radio') return 'radio'
       return 'textbox'
     }
+    var ce = el.getAttribute('contenteditable')
+    if (el.isContentEditable || ce === '' || ce === 'true') return 'textbox'
     return ''
   }
 
   function refOf(el) {
+    // stable across snapshots: an element keeps its @ref until it leaves the DOM
+    var ref = el.getAttribute('data-cb-ref')
+    if (ref) return ref
     window.__cbRefSeq = window.__cbRefSeq || 0
-    var ref = 'e' + (++window.__cbRefSeq)
+    ref = 'e' + (++window.__cbRefSeq)
     el.setAttribute('data-cb-ref', ref)
     return ref
   }
@@ -67,7 +72,8 @@ function (opts) {
       var label = el.getAttribute('aria-label') || el.getAttribute('placeholder') || labelFor(el) || ''
       if (label && label !== item.text) item.name = String(label).replace(/\s+/g, ' ').trim().slice(0, 60)
       if (el.type) item.type = String(el.type)
-      if (el.value !== undefined && el.value !== '' && el.value !== null) item.value = String(el.value).slice(0, 60)
+      if (el.value !== undefined && el.value !== '' && el.value !== null && el.type !== 'password') item.value = String(el.value).slice(0, 60)
+      for (var state of ['aria-pressed', 'aria-expanded', 'aria-selected']) { var sv = el.getAttribute(state); if (sv) item[state.slice(5)] = sv }
       if (t === 'A' && el.href) item.href = el.href
       if (el.checked === true) item.checked = true
       if (el.disabled === true) item.disabled = true
@@ -77,14 +83,23 @@ function (opts) {
     return res
   }
 
-  function findRole(want) {
-    var els = document.querySelectorAll('a, button, select, textarea, summary, input, [role], [onclick], [tabindex], [contenteditable]')
+  function nameOf(el) {
+    return String(el.getAttribute('aria-label') || el.getAttribute('placeholder') || labelFor(el) ||
+      el.innerText || el.textContent || el.value || '').replace(/\s+/g, ' ').trim().slice(0, 80)
+  }
+
+  function findInteractive(kind, needle, name) {
     var out = []
+    // [role] on top of INTERACTIVE so less common roles (dialog, grid…) are findable too
+    var els = document.querySelectorAll(INTERACTIVE + ', [role]')
     for (var i = 0; i < els.length && out.length < 20; i++) {
       var el = els[i]
-      var role = roleOf(el)
-      if (role.toLowerCase() !== want || !visible(el)) continue
-      out.push({ ref: refOf(el), tag: el.tagName.toLowerCase(), role: role, text: String(el.innerText || el.value || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim().slice(0, 80) })
+      if (!visible(el)) continue
+      if (kind === 'role') {
+        if (roleOf(el).toLowerCase() !== needle) continue
+        if (name && nameOf(el).toLowerCase().indexOf(name) === -1) continue
+      } else if (nameOf(el).toLowerCase().indexOf(needle) === -1) continue // kind === 'label'
+      out.push({ ref: refOf(el), tag: el.tagName.toLowerCase(), role: roleOf(el) || el.tagName.toLowerCase(), text: String(el.innerText || el.value || '').replace(/\s+/g, ' ').trim().slice(0, 80) })
     }
     return out
   }
@@ -105,8 +120,9 @@ function (opts) {
   }
 
   if (opts.find) {
-    var needle = String(opts.find.needle).toLowerCase()
-    return opts.find.kind === 'role' ? findRole(needle) : findText(needle)
+    var needle = String(opts.find.needle || '').toLowerCase()
+    var name = String(opts.find.name || '').toLowerCase()
+    return opts.find.kind === 'text' ? findText(needle) : findInteractive(opts.find.kind, needle, name)
   }
   return snapshot(opts)
 }

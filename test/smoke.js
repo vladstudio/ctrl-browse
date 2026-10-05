@@ -41,17 +41,18 @@ let groupSeq = 500
 
 function fakeDebugSend(m) {
   const { method, params } = m
-  cdpCalls.push(method)
+  cdpCalls.push(method + (params && params.responseCode !== undefined ? ':' + params.responseCode : ''))
   if (method === 'Runtime.evaluate') {
     const expr = params.expression
     if (expr.includes('markdown')) return { result: { value: { title: 'Example Page', url: 'http://localhost:3000', markdown: '# Example\n\nHello **world**' } } }
-    if (expr.includes('indexOf')) return { result: { value: true } }
     if (expr.includes('__cbRefSeq')) {
       const value = expr.includes('"find"')
         ? [{ ref: 'e1', tag: 'button', role: 'button', text: 'Go' }]
         : { title: 'Example', url: 'http://localhost:3000', elements: [{ ref: 'e1', tag: 'button', role: 'button', text: 'Go' }] }
       return { result: { value } }
     }
+    if (expr.includes('isContentEditable')) return { result: { value: { ok: true, value: 'me@example.com' } } }
+    if (expr.includes('indexOf')) return { result: { value: true } }
     if (expr.includes('innerText')) return { result: { value: 'Hello' } }
     if (expr.includes('scrollIntoView')) return { result: { value: { x: 50, y: 60, disabled: false } } }
     if (expr.includes('getBoundingClientRect')) return { result: { value: { x: 50, y: 60, disabled: false } } }
@@ -228,7 +229,44 @@ async function main() {
   ok(r.code === 0 && r.out.includes('route added'), 'mock route added', JSON.stringify(r))
   fakeEvent({ method: 'Fetch.requestPaused', params: { requestId: 'req-2', resourceType: 'Fetch', request: { method: 'GET', url: 'https://mock.example.com/api' } } })
   await sleep(300)
-  ok(cdpCalls.includes('Fetch.fulfillRequest'), 'route --body → Fetch.fulfillRequest')
+  ok(cdpCalls.includes('Fetch.fulfillRequest:200'), 'route --body → Fetch.fulfillRequest', JSON.stringify(cdpCalls.slice(-20)))
+
+  // 9b2. preflights for mocked URLs are answered with echoed CORS headers
+  fakeEvent({ method: 'Fetch.requestPaused', params: { requestId: 'req-3', resourceType: 'Preflight', request: { method: 'OPTIONS', url: 'https://mock.example.com/api', headers: { Origin: 'http://localhost:3000', 'Access-Control-Request-Method': 'POST', 'Access-Control-Request-Headers': 'content-type' } } } })
+  await sleep(300)
+  ok(cdpCalls.includes('Fetch.fulfillRequest:204'), 'mocked URL preflight → 204 with echoed CORS headers', JSON.stringify(cdpCalls.slice(-20)))
+
+  // 9b3. --status without --body fulfills; --times 1 expires after one match
+  r = await run(['-s', 'feat-a', 'network', 'route', 'once.test/*', '--status', '409', '--times', '1'])
+  ok(r.code === 0 && r.out.includes('route added'), 'route --status 409 --times 1 (no --body)', JSON.stringify(r))
+  fakeEvent({ method: 'Fetch.requestPaused', params: { requestId: 'req-4', resourceType: 'XHR', request: { method: 'POST', url: 'https://once.test/api' } } })
+  await sleep(300)
+  ok(cdpCalls.includes('Fetch.fulfillRequest:409'), '--status alone fulfills with an empty body', JSON.stringify(cdpCalls.slice(-20)))
+  fakeEvent({ method: 'Fetch.requestPaused', params: { requestId: 'req-5', resourceType: 'XHR', request: { method: 'POST', url: 'https://once.test/api' } } })
+  await sleep(300)
+  ok(cdpCalls.includes('Fetch.continueRequest'), '--times 1 consumed → the next request continues', JSON.stringify(cdpCalls.slice(-20)))
+
+  // 9b4. token-like query params are redacted unless --raw
+  fakeEvent({ method: 'Network.requestWillBeSent', params: { requestId: 'req-6', request: { method: 'GET', url: 'https://x.test/sse?token=eyJhbGciOiJIUzI1NiJ9.SECRET.SIG' } } })
+  await sleep(200)
+  r = await run(['-s', 'feat-a', 'network', 'requests', '--filter', 'x.test'])
+  ok(r.code === 0 && r.out.includes('[REDACTED]') && !r.out.includes('SECRET.SIG'), 'token query params redacted', JSON.stringify(r))
+  r = await run(['-s', 'feat-a', 'network', 'requests', '--filter', 'x.test', '--raw'])
+  ok(r.code === 0 && r.out.includes('SECRET.SIG'), '--raw restores them')
+
+  // 9b5. press / viewport / storage / find label / wait --fn
+  r = await run(['-s', 'feat-a', 'press', 'meta+a'])
+  ok(r.code === 0 && cdpCalls.includes('Input.dispatchKeyEvent'), 'press meta+a → key events')
+  r = await run(['-s', 'feat-a', 'viewport', '1280', '800'])
+  ok(r.code === 0 && cdpCalls.includes('Emulation.setDeviceMetricsOverride'), 'viewport override')
+  r = await run(['-s', 'feat-a', 'viewport', 'reset'])
+  ok(r.code === 0 && cdpCalls.includes('Emulation.clearDeviceMetricsOverride'), 'viewport reset')
+  r = await run(['-s', 'feat-a', 'storage', 'set', 'local', 'flag', '1'])
+  ok(r.code === 0, 'storage set', JSON.stringify(r))
+  r = await run(['-s', 'feat-a', 'find', 'label', 'Go'])
+  ok(r.code === 0 && r.out.includes('@e1'), 'find label → refs', JSON.stringify(r))
+  r = await run(['-s', 'feat-a', 'wait', '--fn', 'document.readyState'])
+  ok(r.code === 0 && r.out.includes('truthy'), 'wait --fn', JSON.stringify(r))
 
   // 9c. screenshot writes a file
   const shotPath = '/tmp/ctrl-browse-test.png'

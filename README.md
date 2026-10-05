@@ -79,20 +79,27 @@ sessions | status | shutdown
 open <url> | goto <url>            # goto replies with page as markdown
 back | forward | reload
 wait <selector|ms> | wait --text "Welcome" | wait --load   [--timeout ms]
+wait --text-gone "Loading…" | wait --gone <sel> | wait --fn "<js expr>" | wait --network-idle [ms]
+                                   # every wait also takes --timeout / --interval
 
 dom [--limit n]                    # document HTML
 snapshot                           # page outline with @refs
-snapshot -i                        # interactive elements with @refs
-screenshot <path> [--full]         # viewport or full-page PNG
+snapshot -i                        # interactive elements with @refs + aria state
+screenshot <path> [--full] [--scale n] [--max-width n] [--el <sel|@ref>]
+viewport <w> <h> [--dpr n]         # real viewport resize — undo with: viewport reset
 eval <js>                          # run JS in the page (awaits promises)
 get text <sel> | get html <sel>
+storage get|set|clear local|session <key> [value]
 scrollintoview <sel>
 
 click <sel|@ref>                   # real (trusted) mouse click at element center
-fill <sel> <text>                  # clear + set value, fires input/change
-type <sel> <text> [--delay ms]     # real keystrokes
+fill <sel> <text>                  # inputs: clear + set value (fires input/change)
+                                   # contenteditable: select-all + trusted insert (Lexical, ProseMirror)
+type <sel> <text> [--delay ms]     # real keystrokes between keys (input;  default 15ms)
+press <key[+mod…]>                 # press Escape, press Meta+a — shortcuts, never text
 select <sel> <value|label>
-find role <role> [click|show]
+find role <role> [--name <s>] [click|show]
+find label <accessible name> [click|show]
 find text <text> [click|show]
 
 mouse move <x> <y> [--duration ms] [--steps n] [--human --seed n]
@@ -104,13 +111,15 @@ tab new [url] [--label L]
 tab <tN|label|tabId|title>
 tab close [tN|label|tabId]
 
-console [--clear] [--json]
-errors [--clear]
+console [--clear] [--json] [--since-nav]   # --since-nav: entries since the last page load
+errors [--clear] [--since-nav]
 
-network route <pattern> [--abort] [--body json] [--status n] [--content-type ct] [--resource-type t]
+network route <pattern> [--abort] [--body json] [--status n] [--method M] [--times n] [--header "K: v"] [--content-type ct] [--resource-type t]
+                                   # --status alone fulfills with an empty body; --times N expires the route after N matches;
+                                   # CORS preflights are answered automatically and Origin is echoed, so credentialed mocks work
 network unroute [pattern]
-network requests [--clear] [--filter pat] [--type xhr,fetch] [--method POST] [--status 2xx|200|400-499]
-network request <n|id>
+network requests [--clear] [--filter pat] [--type xhr,fetch] [--method POST] [--status 2xx|200|400-499] [--raw]
+network request <n|id> [--raw]     # token-like params and auth/cookie headers show as [REDACTED] unless --raw
 ```
 
 Global flags: `-s/--session <name>`, `--json`, `--limit n`, `--timeout ms`.
@@ -142,8 +151,11 @@ ctrl-browse -s feature-a close
   interception trusted and reliable.
 - Console/network tracking only covers tabs the extension is attached to
   (i.e. tabs you've run commands against).
-- `@eN` refs are re-assigned on every `snapshot`/`find` — after the page
-  changes, re-snapshot before clicking an old ref.
+- `@eN` refs are stable: an element keeps its ref while it stays in the DOM;
+  resnapshot to pick up new elements. Typed passwords and token-like query
+  params never appear in command output (network detail needs `--raw`).
+- Page JS always runs in the main frame's default world — browser-extension
+  iframes (password managers) don't break commands.
 - Opening DevTools on a tab detaches the debugger; the next command
   re-attaches.
 - The daemon only listens on `127.0.0.1` and rejects browser-page origins.

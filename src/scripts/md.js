@@ -3,36 +3,38 @@ function () {
   var INLINE = { A: 1, SPAN: 1, STRONG: 1, B: 1, EM: 1, I: 1, CODE: 1, SMALL: 1, U: 1, S: 1, MARK: 1, ABBR: 1, SUB: 1, SUP: 1, KBD: 1, CITE: 1, Q: 1, TIME: 1, VAR: 1, SAMP: 1, DEL: 1, INS: 1, BUTTON: 1, INPUT: 1, SELECT: 1, TEXTAREA: 1, LABEL: 1, IMG: 1, BR: 1, FONT: 1, BIG: 1, WBR: 1 }
   var lines = []
 
+  // render one inline node (self, including leaf inputs/links); inlineOf renders
+  // a container's children by mapping them over this
+  function inlineOne(n) {
+    if (n.nodeType === 3) return String(n.nodeValue)
+    if (n.nodeType !== 1) return ''
+    var t = n.tagName
+    if (SKIP[t]) return ''
+    if (t === 'BR') return '\n'
+    if (t === 'A') {
+      var inner = inlineOf(n).replace(/\s+/g, ' ').trim()
+      var href = n.getAttribute('href') ? n.href : ''
+      return href ? ('[' + (inner || href) + '](' + href + ')') : inner
+    }
+    if (t === 'IMG') return '![' + (n.getAttribute('alt') || '') + '](' + (n.currentSrc || n.src || '') + ')'
+    if (t === 'STRONG' || t === 'B') return '**' + inlineOf(n).replace(/\s+/g, ' ').trim() + '**'
+    if (t === 'EM' || t === 'I') return '*' + inlineOf(n).replace(/\s+/g, ' ').trim() + '*'
+    if (t === 'CODE') return '`' + inlineOf(n).trim() + '`'
+    if (t === 'BUTTON') return ' [button: ' + inlineOf(n).replace(/\s+/g, ' ').trim() + ']'
+    if (t === 'INPUT') {
+      var ty = n.getAttribute('type') || 'text'
+      var ph = n.getAttribute('placeholder') || n.getAttribute('name') || ''
+      var v = ty === 'password' ? '' : (n.value || '') // typed passwords never appear in output
+      return ' [input ' + ty + (ph ? ' ' + ph : '') + (v ? ' = ' + v : '') + ']'
+    }
+    if (t === 'SELECT') return ' [select ' + (n.getAttribute('name') || '') + ': ' + (n.selectedOptions && n.selectedOptions[0] ? n.selectedOptions[0].text : '') + ']'
+    if (t === 'TEXTAREA') return ' [textarea ' + (n.getAttribute('name') || '') + ']'
+    return ' ' + inlineOf(n) + ' '
+  }
+
   function inlineOf(el) {
     var out = ''
-    for (var n = el.firstChild; n; n = n.nextSibling) {
-      if (n.nodeType === 3) { out += String(n.nodeValue); continue }
-      if (n.nodeType !== 1) continue
-      var t = n.tagName
-      if (SKIP[t]) continue
-      if (t === 'BR') { out += '\n'; continue }
-      if (t === 'A') {
-        var inner = inlineOf(n).replace(/\s+/g, ' ').trim()
-        var href = n.getAttribute('href') ? n.href : ''
-        out += href ? ('[' + (inner || href) + '](' + href + ')') : inner
-        continue
-      }
-      if (t === 'IMG') { out += '![' + (n.getAttribute('alt') || '') + '](' + (n.currentSrc || n.src || '') + ')'; continue }
-      if (t === 'STRONG' || t === 'B') { out += '**' + inlineOf(n).replace(/\s+/g, ' ').trim() + '**'; continue }
-      if (t === 'EM' || t === 'I') { out += '*' + inlineOf(n).replace(/\s+/g, ' ').trim() + '*'; continue }
-      if (t === 'CODE') { out += '`' + inlineOf(n).trim() + '`'; continue }
-      if (t === 'BUTTON') { out += ' [button: ' + inlineOf(n).replace(/\s+/g, ' ').trim() + ']'; continue }
-      if (t === 'INPUT') {
-        var ty = n.getAttribute('type') || 'text'
-        var ph = n.getAttribute('placeholder') || n.getAttribute('name') || ''
-        var v = n.value || ''
-        out += ' [input ' + ty + (ph ? ' ' + ph : '') + (v ? ' = ' + v : '') + ']'
-        continue
-      }
-      if (t === 'SELECT') { out += ' [select ' + (n.getAttribute('name') || '') + ': ' + (n.selectedOptions && n.selectedOptions[0] ? n.selectedOptions[0].text : '') + ']'; continue }
-      if (t === 'TEXTAREA') { out += ' [textarea ' + (n.getAttribute('name') || '') + ']'; continue }
-      out += ' ' + inlineOf(n) + ' '
-    }
+    for (var n = el.firstChild; n; n = n.nextSibling) out += inlineOne(n)
     return out
   }
 
@@ -108,7 +110,7 @@ function () {
       if (n.nodeType !== 1) continue
       var nt = n.tagName
       if (SKIP[nt]) continue
-      if (INLINE[nt]) { buf += ' ' + inlineOf(n) + ' '; continue }
+      if (INLINE[nt]) { buf += ' ' + inlineOne(n) + ' '; continue }
       flush()
       walk(n)
     }

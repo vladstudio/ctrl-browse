@@ -81,3 +81,36 @@ test('page: find role and find text', () => {
   expect(hits.length).toBe(1)
   expect(hits[0].tag).toBe('span')
 })
+
+test('page: stable refs, aria state, password values never emitted', () => {
+  const w = dom(`<body>
+    <input type="password" value="hunter2">
+    <button aria-pressed="true" aria-expanded="false">Agent</button>
+  </body>`)
+  const one = evalIn(w, PAGE_SRC, { interactive: true, limit: 150 })
+  const two = evalIn(w, PAGE_SRC, { interactive: true, limit: 150 })
+  expect(one.elements.map((e) => e.ref)).toEqual(['e1', 'e2'])
+  expect(two.elements.map((e) => e.ref)).toEqual(['e1', 'e2']) // stable across snapshots
+  expect(one.elements[0].value).toBeUndefined()
+  expect(one.elements[1].pressed).toBe('true')
+  expect(one.elements[1].expanded).toBe('false')
+})
+
+test('page: find label, role + name filter, contenteditable role', () => {
+  const w = dom('<body><button aria-label="Send message">➤</button><button>Cancel</button><div contenteditable="true"></div></body>')
+  const send = evalIn(w, PAGE_SRC, { find: { kind: 'role', needle: 'button', name: 'send message' } })
+  expect(send.length).toBe(1)
+  expect(send[0].tag).toBe('button')
+  const cancel = evalIn(w, PAGE_SRC, { find: { kind: 'label', needle: 'cancel' } })
+  expect(cancel.length).toBe(1) // innerText counts as an accessible name too
+  const boxes = evalIn(w, PAGE_SRC, { find: { kind: 'role', needle: 'textbox' } })
+  expect(boxes.some((b) => b.tag === 'div')).toBe(true) // contenteditable div is a textbox
+})
+
+test('md: password input values are never printed', () => {
+  const w = dom('<body><form><input type="password" name="pw" value="hunter2"><input type="search" name="q" value="hi"></form></body>')
+  const md = evalIn(w, MD_SRC).markdown
+  expect(md).toContain('[input password pw]')
+  expect(md).not.toContain('hunter2')
+  expect(md).toContain('q = hi')
+})

@@ -16,7 +16,10 @@ const PLIST = path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.ctrl-brows
 const VALUE_FLAGS = new Set([
   'label', 'body', 'status', 'content-type', 'resource-type', 'filter', 'type', 'method',
   'seed', 'duration', 'steps', 'delay', 'timeout', 'limit', 'text', 'action',
+  'times', 'header', 'name', 'fn', 'gone', 'text-gone', 'interval',
+  'scale', 'max-width', 'el', 'dpr',
 ])
+const REPEAT_FLAGS = new Set(['header']) // repeatable: --header "K: v" --header "K2: v2"
 
 function parse(argv) {
   const out = { cmd: null, args: [], flags: {}, session: null }
@@ -30,7 +33,8 @@ function parse(argv) {
       if (eq !== -1) { val = name.slice(eq + 1); name = name.slice(0, eq) }
       else if (VALUE_FLAGS.has(name)) val = argv[++i]
       else val = true
-      out.flags[name] = val
+      if (REPEAT_FLAGS.has(name) && val !== true) (out.flags[name] = out.flags[name] || []).push(val)
+      else out.flags[name] = val
       continue
     }
     if (/^-[a-z]$/i.test(a)) { out.flags[a.slice(1)] = true; continue }
@@ -56,23 +60,32 @@ navigation:
   back | forward | reload
   wait <selector|ms>              wait for element or duration
   wait --text "Welcome"           wait for text (substring match)
+  wait --text-gone "Loading…"     wait until text disappears from the page
+  wait --gone <selector>          wait until an element is gone
+  wait --fn "<js expression>"     poll until the expression is truthy
+  wait --network-idle [ms]        no requests for ms (default 500)
   wait --load [--timeout ms]      wait for page load
+                                 (all waits take --timeout and --interval)
 
 page:
   dom [--limit n]                 document HTML
-  snapshot                        page outline with @refs
-  snapshot -i                     interactive elements with @refs
-  screenshot <path> [--full]      PNG screenshot (viewport or full page)
+  snapshot                        page outline with @refs (refs are stable)
+  snapshot -i                     interactive elements with @refs + aria state
+  screenshot <path> [--full] [--scale n] [--max-width n] [--el <sel|@ref>]
+  viewport <w> <h> [--dpr n]      real viewport resize — reset with: viewport reset
   eval <js>                       run JavaScript in the page
   get text <sel> | get html <sel>
+  storage get|set|clear local|session <key> [value]
   scrollintoview <sel>
 
 interact:
   click <sel|@ref>                real mouse click at element center
   fill <sel> <text>               clear + set value (fires input/change)
-  type <sel> <text> [--delay ms]  real keystrokes
+  type <sel> <text> [--delay ms]  real keystrokes (default delay 15ms)
+  press <key[+mod…]>              key press / shortcut — press Escape, press Meta+a
   select <sel> <value|label>
-  find role <role> [click|show]
+  find role <role> [--name <s>] [click|show]
+  find label <accessible name> [click|show]
   find text <text> [click|show]
 
 mouse:
@@ -91,10 +104,14 @@ console:
   errors [--clear]                page errors
 
 network:
-  network route <pattern> [--abort] [--body json] [--status n] [--content-type ct] [--resource-type t]
+  network route <pattern> [--body <json>] [--status n] [--method M] [--times n]
+                      [--header "Name: value"] [--content-type ct] [--resource-type t] [--abort]
+                      (preflights are answered automatically; Origin is echoed
+                      for credentialed requests — --times N expires the mock after N matches)
   network unroute [pattern]
   network requests [--clear] [--filter pat] [--type xhr,fetch] [--method POST] [--status 2xx|200|400-499]
   network request <n|id>
+  (both show [REDACTED] for token-like query params and auth/cookie headers; --raw shows them)
 
 global: -s/--session NAME (or env CTRL_BROWSE_SESSION), --json, --version
 `
