@@ -165,8 +165,8 @@ function connect(timeoutMs) {
 
 async function main() {
   const { cmd, args, flags, session } = parse(process.argv.slice(2))
-  if (!cmd || flags.help || cmd === 'help' || flags.h) { console.log(HELP); process.exit(0) }
   if (flags.version || flags.v) { console.log(JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8')).version); process.exit(0) }
+  if (!cmd || flags.help || cmd === 'help' || flags.h) { console.log(HELP); process.exit(0) }
   if (cmd === 'daemon') { await daemonCmd(args[0]); return }
 
   let ws
