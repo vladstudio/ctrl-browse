@@ -36,21 +36,25 @@ function run(args, env = {}) {
 const tabs = new Map()
 const groups = new Map()
 const cdpCalls = []
+const keyEvents = []
+let clickInfo = null // overrides the click probe's answer (covered / forced cases)
 let tabSeq = 100
 let groupSeq = 500
 
 function fakeDebugSend(m) {
   const { method, params } = m
   cdpCalls.push(method + (params && params.responseCode !== undefined ? ':' + params.responseCode : ''))
+  if (method === 'Input.dispatchKeyEvent') keyEvents.push(params)
   if (method === 'Runtime.evaluate') {
     const expr = params.expression
     if (expr.includes('markdown')) return { result: { value: { title: 'Example Page', url: 'http://localhost:3000', markdown: '# Example\n\nHello **world**' } } }
     if (expr.includes('__cbRefSeq')) {
       const value = expr.includes('"find"')
-        ? [{ ref: 'e1', tag: 'button', role: 'button', text: 'Go' }]
+        ? [1, 2, 3].map((i) => ({ ref: 'e' + i, tag: 'button', role: 'button', text: 'Go' }))
         : { title: 'Example', url: 'http://localhost:3000', elements: [{ ref: 'e1', tag: 'button', role: 'button', text: 'Go' }] }
       return { result: { value } }
     }
+    if (expr.includes('elementFromPoint')) return { result: { value: clickInfo || { x: 50, y: 60, disabled: false } } }
     if (expr.includes('isContentEditable')) return { result: { value: { ok: true, value: 'me@example.com' } } }
     if (expr.includes('indexOf')) return { result: { value: true } }
     if (expr.includes('innerText')) return { result: { value: 'Hello' } }
@@ -257,6 +261,22 @@ async function main() {
   // 9b5. press / viewport / storage / find label / wait --fn
   r = await run(['-s', 'feat-a', 'press', 'meta+a'])
   ok(r.code === 0 && cdpCalls.includes('Input.dispatchKeyEvent'), 'press meta+a → key events')
+  keyEvents.length = 0
+  r = await run(['-s', 'feat-a', 'press', 'Enter'])
+  ok(r.code === 0 && keyEvents.some((e) => e.type === 'keyDown' && e.key === 'Enter' && e.text === '\r'), 'press Enter → keyDown with \\r text (submits forms)', JSON.stringify(keyEvents))
+  clickInfo = { x: 5, y: 5, disabled: false, covered: '<div class="fixed inset-0">', dialog: 'Rename workflow' }
+  r = await run(['-s', 'feat-a', 'click', '#save'])
+  ok(r.code !== 0 && r.err.includes('fixed inset-0') && r.err.includes('Rename workflow') && r.err.includes('--force'), 'covered click names the cover + dialog', JSON.stringify(r))
+  clickInfo = { x: 5, y: 5, disabled: false, forced: '<div class="fixed inset-0">' }
+  r = await run(['-s', 'feat-a', 'click', '#save', '--force'])
+  ok(r.code === 0 && r.out.includes('forced'), 'click --force clicks and says what was on top', JSON.stringify(r))
+  clickInfo = null
+  r = await run(['-s', 'feat-a', 'find', 'label', 'Go', '--nth', '2', 'click'])
+  ok(r.code === 0 && r.out.includes('clicked @e2') && !r.out.includes('clicked the first'), 'find --nth 2 click → second match', JSON.stringify(r))
+  r = await run(['-s', 'feat-a', 'find', 'label', 'Go', 'click'])
+  ok(r.code === 0 && r.out.includes('clicked @e1') && r.out.includes('--nth'), 'find click on many → first + --nth hint', JSON.stringify(r))
+  r = await run(['-s', 'feat-a', 'find', 'label', 'Go', '--nth', '9', 'click'])
+  ok(r.code !== 0 && r.err.includes('only 3 matches'), 'find --nth out of range errors', JSON.stringify(r))
   r = await run(['-s', 'feat-a', 'viewport', '1280', '800'])
   ok(r.code === 0 && cdpCalls.includes('Emulation.setDeviceMetricsOverride'), 'viewport override')
   r = await run(['-s', 'feat-a', 'viewport', 'reset'])

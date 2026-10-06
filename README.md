@@ -92,15 +92,16 @@ get text <sel> | get html <sel>
 storage get|set|clear local|session <key> [value]
 scrollintoview <sel>
 
-click <sel|@ref>                   # real (trusted) mouse click at element center
+click <sel|@ref> [--force]         # real (trusted) mouse click at element center — or a visible part of it
+                                   # when the center is covered; --force clicks the center anyway
 fill <sel> <text>                  # inputs: clear + set value (fires input/change)
                                    # contenteditable: select-all + trusted insert (Lexical, ProseMirror)
 type <sel> <text> [--delay ms]     # real keystrokes between keys (input;  default 15ms)
 press <key[+mod…]>                 # press Escape, press Meta+a — shortcuts, never text
 select <sel> <value|label>
-find role <role> [--name <s>] [click|show]
-find label <accessible name> [click|show]
-find text <text> [click|show]
+find role <role> [--name <s>] [--nth N] [click|show]
+find label <accessible name> [--nth N] [click|show]
+find text <text> [--nth N] [click|show]  # --nth: 1-based, as numbered in the listing
 
 mouse move <x> <y> [--duration ms] [--steps n] [--human --seed n]
 mouse down [left|right|middle] | mouse up [button]

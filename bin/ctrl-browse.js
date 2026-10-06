@@ -17,7 +17,7 @@ const VALUE_FLAGS = new Set([
   'label', 'body', 'status', 'content-type', 'resource-type', 'filter', 'type', 'method',
   'seed', 'duration', 'steps', 'delay', 'timeout', 'limit', 'text', 'action',
   'times', 'header', 'name', 'fn', 'gone', 'text-gone', 'interval',
-  'scale', 'max-width', 'el', 'dpr',
+  'scale', 'max-width', 'el', 'dpr', 'nth',
 ])
 const REPEAT_FLAGS = new Set(['header']) // repeatable: --header "K: v" --header "K2: v2"
 
@@ -79,14 +79,16 @@ page:
   scrollintoview <sel>
 
 interact:
-  click <sel|@ref>                real mouse click at element center
+  click <sel|@ref> [--force]      real mouse click (center, or a visible part if the
+                                 center is covered); --force clicks the center anyway
   fill <sel> <text>               clear + set value (fires input/change)
   type <sel> <text> [--delay ms]  real keystrokes (default delay 15ms)
   press <key[+mod…]>              key press / shortcut — press Escape, press Meta+a
   select <sel> <value|label>
-  find role <role> [--name <s>] [click|show]
-  find label <accessible name> [click|show]
-  find text <text> [click|show]
+  find role <role> [--name <s>] [--nth N] [click|show]
+  find label <accessible name> [--nth N] [click|show]
+  find text <text> [--nth N] [click|show]
+                                 (--nth N picks the Nth match, 1-based)
 
 mouse:
   mouse move <x> <y> [--duration ms] [--steps n] [--human --seed n]

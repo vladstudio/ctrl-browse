@@ -596,25 +596,53 @@ function renderSnapshot(res) {
   return L.join('\n')
 }
 
-async function clickCmd(s, sel) {
+async function clickCmd(s, sel, flags = {}) {
   const tab = await resolveTab(s)
   const info = await evalJS(s, tab.id, `(() => {
     const el = ${selExpr(sel)}
     if (!el) return null
     el.scrollIntoView({ block: 'center', inline: 'center' })
     const r = el.getBoundingClientRect()
-    const x = Math.round(r.left + r.width / 2), y = Math.round(r.top + r.height / 2)
+    const pt = (fx, fy) => [Math.round(r.left + r.width * fx), Math.round(r.top + r.height * fy)]
+    const [x, y] = pt(0.5, 0.5)
+    const disabled = el.disabled === true || el.getAttribute('aria-disabled') === 'true'
+    // a contains b, across shadow roots (elementFromPoint returns the shadow host)
+    const within = (a, b) => { for (let n = b; n; n = n.parentNode || n.host) if (n === a) return true; return false }
     const hit = document.elementFromPoint(x, y)
-    return { x, y, disabled: el.disabled === true || el.getAttribute('aria-disabled') === 'true',
-      covered: hit && !el.contains(hit) && !hit.contains(el) ? hit.tagName.toLowerCase() : null }
+    if (!hit || within(el, hit) || within(hit, el)) return { x, y, disabled }
+    // describe what is on top, so the caller knows how to get it out of the way
+    const t = (hit.getAttribute('aria-label') || hit.innerText || '').replace(/\\s+/g, ' ').trim()
+    const cls = typeof hit.className === 'string' ? hit.className.trim().split(/\\s+/).slice(0, 3).join(' ') : ''
+    const covered = '<' + hit.tagName.toLowerCase() + (hit.id ? '#' + hit.id : '') +
+      (hit.getAttribute('role') ? ' role=' + hit.getAttribute('role') : '') + (!t && cls ? ' class="' + cls + '"' : '') + '>' +
+      (t ? ' "' + (t.length > 50 ? t.slice(0, 50) + '…' : t) + '"' : '')
+    if (${!!flags.force}) return { x, y, disabled, forced: covered }
+    // only the center is covered (a toast or badge over its middle): click a visible part instead
+    for (const [fx, fy] of [[0.25, 0.5], [0.75, 0.5], [0.5, 0.25], [0.5, 0.75], [0.15, 0.15], [0.85, 0.15], [0.15, 0.85], [0.85, 0.85]]) {
+      const [px, py] = pt(fx, fy)
+      const h = document.elementFromPoint(px, py)
+      if (h && within(el, h)) return { x: px, y: py, disabled }
+    }
+    const dlg = Array.from(document.querySelectorAll('[role=dialog], [role=alertdialog], dialog[open], [aria-modal=true]'))
+      .find((d) => d.getClientRects().length && !within(d, el))
+    let dialog = null
+    if (dlg) {
+      const lb = (dlg.getAttribute('aria-labelledby') || '').split(' ')[0]
+      const le = lb && document.getElementById(lb), h = dlg.querySelector('h1, h2, h3, [role=heading]')
+      dialog = (dlg.getAttribute('aria-label') || (le && le.innerText) || (h && h.innerText) || '').replace(/\\s+/g, ' ').trim().slice(0, 60) || 'untitled'
+    }
+    return { x, y, disabled, covered, dialog }
   })()`)
   if (!info) throw new Error(`element not found: ${sel} (run "snapshot -i" for refs)`)
   if (info.disabled) throw new Error('element is disabled')
-  if (info.covered) throw new Error(`${sel} is covered by <${info.covered}> — the click would land on that element instead`)
+  if (info.covered) {
+    throw new Error(`${sel} is covered by ${info.covered}${info.dialog ? ` — an open dialog ("${info.dialog}") is in front; "press Escape" usually closes it` : ''}. ` +
+      'The click would land on that element; "click --force" clicks there anyway')
+  }
   await mouseMoveCmd(s, tab.id, info.x, info.y)
   await cdp(s, tab.id, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: info.x, y: info.y, button: 'left', buttons: 1, clickCount: 1 })
   await cdp(s, tab.id, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: info.x, y: info.y, button: 'left', buttons: 0, clickCount: 1 })
-  return { text: `clicked ${sel} at ${info.x},${info.y}` }
+  return { text: `clicked ${sel} at ${info.x},${info.y}${info.forced ? ` (forced — ${info.forced} is on top there and got the click)` : ''}` }
 }
 
 async function fillCmd(s, sel, text) {
@@ -699,7 +727,10 @@ async function pressCmd(s, chunk) {
     cdp(s, tab.id, 'Input.dispatchKeyEvent', { type, key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers })
   let mask = 0
   for (const m of mods) { mask |= BIT[m]; await press('rawKeyDown', m, m + 'Left', VK[m], mask) }
-  await press('rawKeyDown', key, code, vk, mask)
+  // Enter needs its "\r" text: implicit form submission fires on the keypress
+  // Chrome derives from it — a bare rawKeyDown never submits
+  if (key === 'Enter') await cdp(s, tab.id, 'Input.dispatchKeyEvent', { type: 'keyDown', key, code, text: '\r', unmodifiedText: '\r', windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers: mask })
+  else await press('rawKeyDown', key, code, vk, mask)
   await press('keyUp', key, code, vk, mask)
   for (const m of mods.reverse()) { mask &= ~BIT[m]; await press('keyUp', m, m + 'Left', VK[m], mask) }
   return { text: `pressed ${chunk}` }
@@ -819,7 +850,7 @@ async function tabClose(s, ref) {
 const USAGE = {
   goto: ['open|goto <url>', 1], open: ['open|goto <url>', 1],
   screenshot: ['screenshot <path> [--full] [--scale n] [--max-width n] [--el <sel|@ref>]', 1],
-  click: ['click <selector|@ref>', 1],
+  click: ['click <selector|@ref> [--force]', 1],
   fill: ['fill <selector> <text>', 2], type: ['type <selector> <text> [--delay ms]', 2],
   press: ['press <key[+mod]>', 1],
   get: ['get text|html <sel>', 2],
@@ -927,7 +958,7 @@ async function dispatch(session, cmd, args, flags) {
       if (sub === 'get') return { text: String(v), data: { key, value: v } }
       return { text: `cleared ${sto}${key ? `.${key}` : ''}` }
     }
-    case 'click': return clickCmd(s, args[0])
+    case 'click': return clickCmd(s, args[0], flags)
     case 'fill': return fillCmd(s, args[0], args.slice(1).join(' '))
     case 'type': return typeCmd(s, args[0], args.slice(1).join(' '), flags)
     case 'select': return selectCmd(s, args[0], args.slice(1).join(' '))
@@ -938,16 +969,21 @@ async function dispatch(session, cmd, args, flags) {
       if (!action && (last === 'click' || last === 'show')) { action = last; a = a.slice(0, -1) }
       action = action || 'show'
       const kind = a[0]
-      if (!['role', 'text', 'label'].includes(kind)) throw new Error('usage: find role <role> [--name <s>] | find label <accessible name> | find text <text>  [click|show]')
+      if (!['role', 'text', 'label'].includes(kind)) throw new Error('usage: find role <role> [--name <s>] | find label <accessible name> | find text <text>  [--nth N] [click|show]')
       const needle = kind === 'role' ? a[1] : a.slice(1).join(' ')
       if (!needle) throw new Error(`missing ${kind}`)
       const tab = await resolveTab(s)
       const res = (await evalJS(s, tab.id, `(${PAGE_SRC})(${JSON.stringify({ find: { kind, needle, name: flags.name } })})`)) || []
-      let text = res.length ? res.map((e) => `@${e.ref}  ${String(e.role).padEnd(9)} ${e.text || ''}`).join('\n') : 'no matches'
+      // --nth is 1-based, matching the numbers in the listing
+      const nth = flags.nth === undefined ? null : parseInt(flags.nth, 10)
+      if (nth !== null && !(nth >= 1)) throw new Error('--nth takes a 1-based index, e.g. --nth 2')
+      if (nth !== null && nth > res.length) throw new Error(`--nth ${nth}, but only ${res.length} match${res.length === 1 ? '' : 'es'} for ${kind} "${needle}"`)
+      const pick = nth || 1
+      let text = res.length ? res.map((e, i) => `${String(i + 1).padStart(2)}${nth === i + 1 ? '*' : ' '} @${e.ref}  ${String(e.role).padEnd(9)} ${e.text || ''}`).join('\n') : 'no matches'
       if (action === 'click') {
         if (!res.length) throw new Error(`no match for ${kind} "${needle}" — cannot click`)
-        if (res.length > 1) text += `\n${res.length} matches — clicked the first (re-run with a narrower query to target another)`
-        const r = await clickCmd(s, '@' + res[0].ref)
+        if (res.length > 1 && !nth) text += `\n${res.length} matches — clicked the first (add --nth N to target another)`
+        const r = await clickCmd(s, '@' + res[pick - 1].ref, flags)
         text += `\n${r.text}`
       }
       return { text, data: { matches: res } }
