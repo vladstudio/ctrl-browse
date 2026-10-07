@@ -1,125 +1,188 @@
 // chrome.debugger plumbing: attach, CDP calls, page eval, load waits
-import { sleep } from './util.js'
+import { sleep, warn, errMsg, script } from './util.js'
 import { rpc } from './bridge.js'
-import { applyRoutes } from './network.js'
+import { applyRoutes } from './routes.js'
+import { tabState, debuggerGone, attachedTabs } from './tabstate.js'
 
-export const attached = new Set()
-export const loadWaiters = new Map() // tabId -> Set<entry>
+// chrome.debugger reports failures as message strings only; every match on
+// them lives here
+export const CHROME_ERR = {
+  alreadyAttached: /already attached/i,
+  // bookkeeping diverged from Chrome (SW restart, DevTools, Chromium-fork quirks)
+  notAttached: /not attached|cannot access|detached/i,
+  // the page navigated: its execution context (and objects in it) are gone
+  staleContext: /cannot find (default )?(execution )?context|context .*destroyed|could not find object|cannot find object/i,
+  extensionFrame: /chrome-extension/i,
+}
+
 // every page eval must run in the main frame's default-world execution context —
 // with a password-manager's chrome-extension:// iframe on the page, default
 // Runtime.evaluate fails with "Cannot access a chrome-extension:// URL…"
-export const mainFrameId = new Map() // tabId -> main frame id (via Page.getFrameTree)
-export const mainCtxId = new Map()   // tabId -> main-frame default-world context id
-export const noCtx = new Set()       // tabs that never report contexts (stub extensions, old Chrome)
-export const navTs = new Map()       // tabId -> last load time (console/errors --since-nav)
-
-export async function mainCtxFor(tabId) {
-  if (!noCtx.has(tabId)) {
-    for (let i = 0; i < 10 && !mainCtxId.has(tabId); i++) await sleep(50)
-    if (!mainCtxId.has(tabId)) noCtx.add(tabId)
+async function mainCtxFor(tabId) {
+  const t = tabState(tabId)
+  if (!t.noCtx) {
+    for (let i = 0; i < 10 && !t.ctxId; i++) await sleep(50)
+    if (!t.ctxId) t.noCtx = true
   }
-  return mainCtxId.get(tabId)
+  return t.ctxId
 }
 
-export async function attach(s, tabId) {
-  if (attached.has(tabId)) return
+// one attach per tab even when commands race: callers share the in-flight
+// promise (two parallel attaches made the loser detach the winner)
+/** @param {import('./state.js').Session|null} s @param {number} tabId */
+export function attach(s, tabId) {
+  const t = tabState(tabId)
+  if (!t.attaching) {
+    const p = doAttach(s, tabId)
+    t.attaching = p
+    p.catch(() => { if (t.attaching === p) t.attaching = null })
+  }
+  return t.attaching
+}
+
+async function doAttach(s, tabId) {
   try {
     await rpc('debug.attach', { tabId }, 10000)
   } catch (e) {
     // a previous daemon (killed without detaching) may still hold the debugger
-    if (/already attached/i.test(String(e && e.message))) {
-      await rpc('debug.detach', { tabId }, 5000)
-      await rpc('debug.attach', { tabId }, 10000)
-    } else throw e
+    if (!CHROME_ERR.alreadyAttached.test(errMsg(e))) throw e
+    await rpc('debug.detach', { tabId }, 5000)
+    await rpc('debug.attach', { tabId }, 10000)
   }
-  attached.add(tabId)
-  for (const m of ['Page.enable', 'Log.enable', 'Network.enable']) {
-    try { await rpc('debug.send', { tabId, method: m }, 8000) } catch {}
-  }
+  const t = tabState(tabId)
+  const send = (method) => rpc('debug.send', { tabId, method }, 8000)
+  for (const m of ['Page.enable', 'Log.enable', 'Network.enable']) await send(m).catch(warn(`${m} (tab ${tabId})`))
   // main frame id before Runtime.enable, so the first executionContextCreated is not missed
-  try {
-    const t = await rpc('debug.send', { tabId, method: 'Page.getFrameTree' }, 8000)
-    mainFrameId.set(tabId, t.frameTree.frame.id)
-  } catch {}
-  try { await rpc('debug.send', { tabId, method: 'Runtime.enable' }, 8000) } catch {}
-  if (s && s.routes.length) { try { await applyRoutes(s, tabId) } catch {} }
+  try { t.frameId = (await send('Page.getFrameTree')).frameTree.frame.id } catch (e) { warn(`Page.getFrameTree (tab ${tabId})`)(e) }
+  await send('Runtime.enable').catch(warn(`Runtime.enable (tab ${tabId})`))
+  if (s && s.routes.length) await applyRoutes(s, tabId).catch(warn(`applying routes (tab ${tabId})`))
 }
 
-export async function cdp(s, tabId, method, params = {}, timeout) {
-  const t = timeout || (method.startsWith('Page.') ? 25000 : 15000)
-  await attach(s, tabId)
+/** @returns {Promise<any>} */
+export async function cdp(s, tabId, method, params = {}, timeout = 0) {
+  const ms = timeout || (method.startsWith('Page.') ? 25000 : 15000)
+  const attached = attach(s, tabId)
+  await attached
   try {
-    return await rpc('debug.send', { tabId, method, params }, t)
+    return await rpc('debug.send', { tabId, method, params }, ms)
   } catch (e) {
-    // our `attached` bookkeeping can diverge from Chrome (SW restarts, DevTools,
-    // Chromium-fork quirks) — drop the tab and force a fresh attach before giving up
-    if (!/not attached|cannot access|detached/i.test(String(e && e.message))) throw e
-    attached.delete(tabId)
+    if (!CHROME_ERR.notAttached.test(errMsg(e))) throw e
+    // force a fresh attach — but only once: when parallel commands all fail,
+    // the first one resets and the rest share its new attach
+    debuggerGone(tabId, attached)
     await attach(s, tabId)
-    return rpc('debug.send', { tabId, method, params }, t)
+    return rpc('debug.send', { tabId, method, params }, ms)
   }
 }
 
-export async function evalJS(s, tabId, expression, opts = {}) {
-  const evaluate = async () => {
-    const ctx = await mainCtxFor(tabId)
-    const r = await cdp(s, tabId, 'Runtime.evaluate', {
-      expression, returnByValue: true, awaitPromise: opts.awaitPromise !== false, userGesture: true,
-      ...(ctx ? { contextId: ctx } : {}),
-    })
-    if (r && r.exceptionDetails) {
-      const d = r.exceptionDetails
-      throw new Error('page eval error: ' + String((d.exception && (d.exception.description || d.exception.value)) || d.text).slice(0, 400))
-    }
-    return r && r.result ? r.result.value : undefined
+function resultValue(r) {
+  if (r && r.exceptionDetails) {
+    const d = r.exceptionDetails
+    throw new Error('page eval error: ' + String((d.exception && (d.exception.description || d.exception.value)) || d.text).slice(0, 400))
   }
+  return r && r.result ? r.result.value : undefined
+}
+
+// one retry after a navigation swapped the context out; explain extension frames
+async function inPage(tabId, run) {
   try {
-    return await evaluate()
+    return await run()
   } catch (e) {
-    const msg = String((e && e.message) || e)
-    if (/cannot find.*context|context .*destroyed/i.test(msg)) { mainCtxId.delete(tabId); return evaluate() } // stale after a navigation
-    if (/chrome-extension/i.test(msg))
+    const msg = errMsg(e)
+    if (CHROME_ERR.staleContext.test(msg)) {
+      const t = tabState(tabId)
+      t.ctxId = null
+      t.actions = null
+      return run()
+    }
+    if (CHROME_ERR.extensionFrame.test(msg)) {
       throw new Error(msg + ' — an extension frame we cannot control (usually a password manager) is injected on this page; disable it for this site or use a clean profile')
+    }
     throw e
   }
 }
 
-export async function waitComplete(tabId, timeout) {
+/** @returns {Promise<any>} */
+export function evalJS(s, tabId, expression, opts = {}) {
+  return inPage(tabId, async () => {
+    const ctx = await mainCtxFor(tabId)
+    return resultValue(await cdp(s, tabId, 'Runtime.evaluate', {
+      expression, returnByValue: true, awaitPromise: opts.awaitPromise !== false, userGesture: true,
+      ...(ctx ? { contextId: ctx } : {}),
+    }))
+  })
+}
+
+// src/scripts/actions.js, evaluated once per page context; calls reuse the
+// function's remote handle instead of re-sending its source
+function actionsHandle(s, tabId) {
+  const t = tabState(tabId)
+  if (!t.actions) {
+    const p = (async () => {
+      const ctx = await mainCtxFor(tabId)
+      const r = await cdp(s, tabId, 'Runtime.evaluate', { expression: `(${script('actions')})`, ...(ctx ? { contextId: ctx } : {}) })
+      resultValue(r)
+      return /** @type {string} */ (r.result.objectId)
+    })()
+    t.actions = p
+    p.catch(() => { if (t.actions === p) t.actions = null })
+  }
+  return t.actions
+}
+
+// run one operation of src/scripts/actions.js in the page. Arguments travel
+// as JSON values — command-line text is never spliced into code
+/** @returns {Promise<any>} */
+export function pageCall(s, tabId, op, arg = {}) {
+  return inPage(tabId, async () => resultValue(await cdp(s, tabId, 'Runtime.callFunctionOn', {
+    objectId: await actionsHandle(s, tabId),
+    functionDeclaration: 'function (op, arg) { return this(op, arg) }',
+    arguments: [{ value: op }, { value: arg }],
+    returnByValue: true, awaitPromise: true, userGesture: true,
+  })))
+}
+
+/** @param {import('./state.js').Session} s @param {number} tabId @param {'md'|'page'} name @param {any} [arg] */
+export const pageScript = (s, tabId, name, arg) =>
+  evalJS(s, tabId, `(${script(name)})(${arg === undefined ? '' : JSON.stringify(arg)})`)
+
+// polls chrome.tabs until the tab is loaded. `navigating`: a navigation was
+// just requested, so the old page's "complete" (or a pending url) doesn't count
+export async function waitComplete(tabId, timeout, { navigating = false } = {}) {
   const t0 = Date.now()
+  if (navigating) await sleep(150)
   for (;;) {
     const tab = await rpc('tabs.get', { tabId }).catch(() => { throw new Error('tab was closed') })
-    if (tab.status === 'complete') return tab
+    if (tab.status === 'complete' && !tab.pendingUrl) return tab
     if (Date.now() - t0 > timeout) throw new Error(`timeout waiting for page load (${timeout}ms)`)
     await sleep(150)
   }
 }
 
+// resolves on the tab's next Page.loadEventFired; call before navigating
 export function waitLoadEvent(tabId, timeout) {
-  let entry
-  const p = new Promise((resolve, reject) => {
-    entry = { resolve, reject, tabId }
-    entry.timer = setTimeout(() => { cleanup(); reject(new Error(`timeout waiting for page load (${timeout}ms)`)) }, timeout)
-    entry.cleanup = cleanup
-    entry.cancel = () => { cleanup(); reject(new Error('cancelled')) }
+  const t = tabState(tabId)
+  /** @type {NodeJS.Timeout|undefined} */
+  let timer
+  /** @type {import('./tabstate.js').LoadWaiter} */
+  let w = { done() {}, fail() {} }
+  /** @type {Promise<void>} */
+  const promise = new Promise((resolve, reject) => {
+    const settle = () => { clearTimeout(timer); t.loadWaiters.delete(w) }
+    w = { done: () => { settle(); resolve() }, fail: (e) => { settle(); reject(e) } }
   })
-  function cleanup() {
-    clearTimeout(entry.timer)
-    const set = loadWaiters.get(entry.tabId)
-    if (set) { set.delete(entry); if (!set.size) loadWaiters.delete(entry.tabId) }
-  }
-  const set = loadWaiters.get(tabId) || new Set()
-  set.add(entry); loadWaiters.set(tabId, set)
-  p.cleanup = cleanup
-  p.catch(() => {})
-  return p
+  timer = setTimeout(() => w.fail(new Error(`timeout waiting for page load (${timeout}ms)`)), timeout)
+  t.loadWaiters.add(w)
+  promise.catch(() => {}) // callers that give up early must not leave an unhandled rejection
+  return { promise, cancel: () => { clearTimeout(timer); t.loadWaiters.delete(w) } }
 }
 
 // detach all debuggers and exit — also used by the shutdown command
 // (a killed daemon leaves tabs debugger-locked for the next daemon)
 export async function quit() {
-  for (const tabId of [...attached]) {
-    try { await rpc('debug.detach', { tabId }, 2000) } catch {}
-    attached.delete(tabId)
+  for (const tabId of attachedTabs()) {
+    await rpc('debug.detach', { tabId }, 2000).catch(warn(`detach (tab ${tabId})`))
+    debuggerGone(tabId)
   }
   process.exit(0)
 }

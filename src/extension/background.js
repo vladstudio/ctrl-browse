@@ -1,10 +1,12 @@
 // ctrl-browse bridge — connects to the local daemon (ws://127.0.0.1:9876) and
 // executes chrome.tabs / chrome.tabGroups / chrome.debugger (CDP) calls.
 const PORT = 9876
+// sha256 of this file with this value blanked (scripts/gen.js) — tells the
+// daemon whether Chrome runs the code that's on disk or an older load
+const CODE = '746589ae4292fd6c'
 
+/** @type {WebSocket|null} */
 let ws = null
-const pending = new Map()
-let seq = 1
 let backoff = 2000
 let lastSeen = 0
 
@@ -26,21 +28,16 @@ function connect() {
   let sock
   try { sock = new WebSocket(`ws://127.0.0.1:${PORT}`) } catch { return schedule() }
   ws = sock
-  sock.onopen = () => { backoff = 2000; lastSeen = Date.now(); send({ event: 'hello' }) }
+  sock.onopen = () => { backoff = 2000; lastSeen = Date.now(); send({ event: 'hello', code: CODE }) }
   sock.onmessage = (ev) => {
     let m
     try { m = JSON.parse(ev.data) } catch { return }
     if (m && m.event === 'ping') { send({ event: 'pong' }); return }
     if (m && m.event === 'pong') return
-    if (m && m.id !== undefined) handle(m).catch(() => {})
+    if (m && m.id !== undefined) handle(m) // never rejects: errors are sent back
   }
-  sock.onclose = () => { ws = null; rejectAll('daemon connection lost'); schedule() }
+  sock.onclose = () => { ws = null; schedule() }
   sock.onerror = () => {}
-}
-
-function rejectAll(msg) {
-  for (const [, p] of pending) p.reject(new Error(msg))
-  pending.clear()
 }
 
 async function handle(m) {
@@ -50,7 +47,7 @@ async function handle(m) {
     const result = await fn(m)
     send({ id: m.id, ok: true, result })
   } catch (e) {
-    send({ id: m.id, ok: false, error: (e && e.message) || String(e) })
+    send({ id: m.id, ok: false, error: e instanceof Error ? e.message : String(e) })
   }
 }
 
@@ -65,7 +62,6 @@ const handlers = {
   'tabs.query': (m) => chrome.tabs.query(m.query || {}),
   'tabs.group': (m) => (m.groupId ? chrome.tabs.group({ tabIds: m.tabIds, groupId: m.groupId }) : chrome.tabs.group({ tabIds: m.tabIds })),
   'windows.update': (m) => chrome.windows.update(m.windowId, m.props),
-  'groups.get': (m) => chrome.tabGroups.get(m.groupId),
   'groups.update': (m) => chrome.tabGroups.update(m.groupId, m.props),
   'groups.query': async (m) => {
     // filter by exact title ourselves to avoid pattern-matching surprises
@@ -86,7 +82,9 @@ chrome.debugger.onDetach.addListener((source) => {
   if (source && source.tabId !== undefined) send({ event: 'debugDetached', tabId: source.tabId })
 })
 
-chrome.tabs.onRemoved.addListener((tabId) => send({ event: 'tabs.onRemoved', tabId }))
+// windowClosing tells "the user closed this tab" from "its window went away"
+// (a group lost to a closed window keeps its session for re-binding)
+chrome.tabs.onRemoved.addListener((tabId, info) => send({ event: 'tabs.onRemoved', tabId, windowClosing: info.isWindowClosing }))
 
 chrome.tabGroups.onRemoved.addListener((group) => send({ event: 'groups.onRemoved', groupId: group.id }))
 

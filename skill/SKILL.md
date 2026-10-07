@@ -18,7 +18,8 @@ name, so your tabs stay separate from the user's.
   user's explicit go-ahead.
 - Stay on task: don't visit or read the user's other sites, tabs or accounts.
 - If a command says the browser is not connected, ask the user to open Chrome
-  with the ctrl-browse extension loaded. Same if an error blames an extension
+  with the ctrl-browse extension loaded. If it says Chrome runs an older extension,
+  ask them to reload it at `chrome://extensions`. Same if an error blames an extension
   frame (password manager): ask them to disable it for the site. Don't retry in
   a loop.
 - Before `close`, undo what you changed: `viewport reset`, `network unroute`.
@@ -41,6 +42,7 @@ ctrl-browse -s task snapshot -i                  # look again after the page cha
   snapshot when you know what you want.
 - If `click` says the element is covered by a dialog, `press Escape` usually
   closes it. Use `--force` only when you mean to click whatever is on top.
+- Text that starts with `-` goes after `--`: `fill @e5 -- -42`.
 - `fill` sets a value at once (works with React inputs and rich-text editors);
   `type` sends real keystrokes for inputs that react per key (autocomplete,
   mentions).

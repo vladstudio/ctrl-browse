@@ -114,3 +114,102 @@ test('md: password input values are never printed', () => {
   expect(md).not.toContain('hunter2')
   expect(md).toContain('q = hi')
 })
+// ------------------------------------------------------------- actions.js
+const ACTIONS_SRC = readFileSync(path.join(HERE, '..', 'src', 'scripts', 'actions.js'), 'utf8')
+const act = (w, op, arg = {}) => w.eval(`(${ACTIONS_SRC})(${JSON.stringify(op)}, ${JSON.stringify(arg)})`)
+
+// jsdom has no layout. A tiny one: an element's box comes from data-rect="x,y,w,h"
+// (others are 10x10 at 0,0), and elementFromPoint returns the last element in
+// document order whose box contains the point — later elements paint on top,
+// like the positioned overlays this logic is about
+function actDom(html) {
+  const w = dom(html)
+  const box = (el) => {
+    const [x, y, wd, h] = (el.getAttribute('data-rect') || '0,0,10,10').split(',').map(Number)
+    return { left: x, top: y, width: wd, height: h, right: x + wd, bottom: y + h }
+  }
+  w.HTMLElement.prototype.getBoundingClientRect = function () { return box(this) }
+  w.HTMLElement.prototype.getClientRects = function () { return this.hasAttribute('data-rect') ? [box(this)] : [] }
+  w.Element.prototype.scrollIntoView = () => {}
+  w.HTMLElement.prototype.focus = () => {} // jsdom's focus() throws under bun (cross-realm FocusEvent)
+  w.document.elementFromPoint = (x, y) => [...w.document.body.querySelectorAll('[data-rect]')]
+    .filter((el) => { const r = box(el); return x >= r.left && x < r.right && y >= r.top && y < r.bottom })
+    .at(-1) || null
+  return w
+}
+
+const BUTTON = '<button id="go" data-rect="0,0,100,40">Go <span id="lbl" data-rect="40,10,20,20">now</span></button>'
+
+test('actions: click lands on the center when nothing covers it (children count as the element)', () => {
+  const w = actDom(`<body>${BUTTON}</body>`)
+  expect(act(w, 'click', { sel: '#go' })).toEqual({ x: 50, y: 20, disabled: false })
+  expect(act(w, 'click', { sel: '#missing' })).toBe(null)
+})
+
+test('actions: a toast over the center → click a visible part instead', () => {
+  const w = actDom(`<body>${BUTTON}<div class="toast" data-rect="30,0,40,40">Saved</div></body>`)
+  expect(act(w, 'click', { sel: '#go' })).toEqual({ x: 25, y: 20, disabled: false })
+})
+
+test('actions: fully covered → names the cover and the open dialog; --force clicks anyway', () => {
+  const w = actDom(`<body>${BUTTON}<div role="dialog" aria-label="Rename workflow" data-rect="0,0,500,500"><div class="scrim fixed" data-rect="0,0,500,500"></div></div></body>`)
+  expect(act(w, 'click', { sel: '#go' })).toEqual({ x: 50, y: 20, disabled: false, covered: '<div class="scrim fixed">', dialog: 'Rename workflow' })
+  expect(act(w, 'click', { sel: '#go', force: true })).toEqual({ x: 50, y: 20, disabled: false, forced: '<div class="scrim fixed">' })
+})
+
+test('actions: disabled and aria-disabled are reported', () => {
+  const w = actDom('<body><button id="a" disabled data-rect="0,0,10,10">A</button><div id="b" role="button" aria-disabled="true" data-rect="20,0,10,10">B</div></body>')
+  expect(act(w, 'click', { sel: '#a' }).disabled).toBe(true)
+  expect(act(w, 'click', { sel: '#b' }).disabled).toBe(true)
+})
+
+test('actions: fill sets value, fires input + change, hides passwords', () => {
+  const w = actDom('<body><input id="e"><input id="p" type="password"><textarea id="t"></textarea></body>')
+  const seen = []
+  w.document.getElementById('e').addEventListener('input', () => seen.push('input'))
+  w.document.getElementById('e').addEventListener('change', () => seen.push('change'))
+  expect(act(w, 'fill', { sel: '#e', value: 'me@x.test' })).toEqual({ ok: true, value: 'me@x.test' })
+  expect(seen).toEqual(['input', 'change'])
+  expect(act(w, 'fill', { sel: '#p', value: 'hunter2' })).toEqual({ ok: true, value: '[REDACTED]' })
+  expect(act(w, 'fill', { sel: '#t', value: 'a\nb' }).ok).toBe(true)
+})
+
+test('actions: fill on contenteditable selects content for a trusted insert', () => {
+  const w = actDom('<body><div id="ed" contenteditable="true">old text</div></body>')
+  const ed = w.document.getElementById('ed')
+  if (ed.isContentEditable === undefined) Object.defineProperty(ed, 'isContentEditable', { value: true })
+  expect(act(w, 'fill', { sel: '#ed', value: 'new' })).toEqual({ editable: true })
+  expect(String(w.getSelection())).toBe('old text')
+})
+
+test('actions: select by value or label; lists options on a miss', () => {
+  const w = actDom('<body><select id="s"><option value="us">United States</option><option value="de">Germany</option></select><div id="d"></div></body>')
+  expect(act(w, 'select', { sel: '#s', value: 'Germany' })).toEqual({ value: 'de', text: 'Germany' })
+  expect(act(w, 'select', { sel: '#s', value: 'us' }).value).toBe('us')
+  const miss = act(w, 'select', { sel: '#s', value: 'France' })
+  expect(miss.error).toContain('France')
+  expect(miss.options.map((o) => o.value)).toEqual(['us', 'de'])
+  expect(act(w, 'select', { sel: '#d', value: 'x' }).error).toContain('not a <select>')
+})
+
+test('actions: @refs from snapshot resolve; hostile refs are just misses', () => {
+  const w = actDom('<body><button>Go</button><p id="p">Hello <b>there</b></p></body>')
+  evalIn(w, PAGE_SRC, { interactive: true, limit: 150 })
+  expect(act(w, 'exists', { sel: '@e1' })).toBe(true)
+  expect(act(w, 'exists', { sel: '@e1"] , body, [x="' })).toBe(false)
+  expect(act(w, 'get', { sel: '#p', what: 'text' })).toBe('Hello there')
+  expect(act(w, 'get', { sel: '#p', what: 'html' })).toBe('Hello <b>there</b>')
+  expect(act(w, 'get', { sel: '#nope', what: 'text' })).toBe(null)
+})
+
+test('actions: has-text, storage, dom, unknown op', () => {
+  const w = actDom('<body><p>Welcome back</p></body>')
+  expect(act(w, 'has-text', { text: 'Welcome' })).toBe(true)
+  expect(act(w, 'has-text', { text: 'Goodbye' })).toBe(false)
+  act(w, 'storage', { sub: 'set', kind: 'local', key: 'k', value: 'v 1' })
+  expect(act(w, 'storage', { sub: 'get', kind: 'local', key: 'k' })).toBe('v 1')
+  act(w, 'storage', { sub: 'clear', kind: 'local', key: 'k' })
+  expect(act(w, 'storage', { sub: 'get', kind: 'local', key: 'k' })).toBe(null)
+  expect(act(w, 'dom')).toContain('<p>Welcome back</p>')
+  expect(() => act(w, 'nope')).toThrow('unknown page op')
+})

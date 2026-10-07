@@ -2,6 +2,24 @@ name: test
 on: [push, pull_request]
 jobs:
   test:
+    # macOS too: pipe writes are async there, which is where output truncation shows
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run test
+      - run: node test/smoke.js
+
+  e2e:
+    # the real extension in a real (headless) Chromium
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -10,5 +28,5 @@ jobs:
         with:
           node-version: 20
       - run: bun install --frozen-lockfile
-      - run: bun run test
-      - run: node test/smoke.js
+      - run: npx -y playwright@1 install --with-deps chromium
+      - run: node test/e2e.js

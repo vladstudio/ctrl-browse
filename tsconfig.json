@@ -1,0 +1,21 @@
+{
+  // type-check the JavaScript (JSDoc types); nothing is emitted
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "target": "es2022",
+    "lib": ["es2023", "dom"],
+    "types": ["node", "chrome"],
+    // strict, except that unannotated parameters may stay `any` (JSDoc on
+    // every callback would bury the code); flags are typed (src/spec.js Flags)
+    "strict": true,
+    "noImplicitAny": false,
+    "skipLibCheck": true
+  },
+  "include": ["bin", "src", "scripts"],
+  // in-page scripts are bare function expressions, evaluated by the daemon
+  "exclude": ["src/scripts"]
+}

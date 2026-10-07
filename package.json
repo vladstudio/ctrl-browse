@@ -1,6 +1,6 @@
 {
   "name": "ctrl-browse",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Control your existing Chrome browser from the CLI with named sessions bound to tab groups",
   "keywords": [
     "chrome",
@@ -26,7 +26,10 @@
   "files": ["bin", "src", "skill"],
   "scripts": {
     "start": "bun src/daemon.js",
-    "test": "bun test/smoke.js && bun test test/page.test.js"
+    "test": "bun test/smoke.js && bun test test/*.test.js",
+    "e2e": "node test/e2e.js",
+    "typecheck": "tsc -p .",
+    "gen": "node scripts/gen.js"
   },
   "engines": {
     "node": ">=20"
@@ -35,6 +38,10 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
-    "jsdom": "^30.1.0"
+    "@types/chrome": "^0.3.4",
+    "@types/node": "^26.6.4",
+    "@types/ws": "^8.18.2",
+    "jsdom": "^30.1.0",
+    "typescript": "^7.0.2"
   }
 }

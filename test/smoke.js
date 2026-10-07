@@ -14,7 +14,11 @@ const PORT = 9900 + Math.floor(Math.random() * 400)
 // keep the test daemon's state file out of the real ~/.ctrl-browse
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'ctrl-browse-test-'))
 process.env.HOME = HOME
-const { EXT_ORIGIN } = await import('../src/daemon/util.js')
+const { extOrigin } = await import('../src/daemon/util.js')
+const { BRIDGE_FILE, bridgeHash } = await import('../src/common.js')
+const CODE = bridgeHash(fs.readFileSync(BRIDGE_FILE, 'utf8')) // what an up-to-date extension reports
+const EXT_ORIGIN = extOrigin()
+const SRC = Object.fromEntries(['md', 'page', 'actions'].map((n) => [n, fs.readFileSync(path.join(HERE, '..', 'src', 'scripts', n + '.js'), 'utf8')]))
 
 let failures = 0
 function ok(cond, msg, detail) {
@@ -23,6 +27,11 @@ function ok(cond, msg, detail) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+// poll instead of sleeping a fixed time: true as soon as cond() holds, false after ms
+async function until(cond, ms = 3000) {
+  for (const t0 = Date.now(); Date.now() - t0 < ms; await sleep(20)) if (await cond()) return true
+  return false
+}
 
 function run(args, env = {}) {
   return new Promise((resolve) => {
@@ -42,9 +51,33 @@ const tabs = new Map()
 const groups = new Map()
 const cdpCalls = []
 const keyEvents = []
+const pageOps = []     // [op, arg] of every actions.js call
+const attachCalls = [] // tabIds
+const tabUpdates = []  // tabs.update props
+let actionsInstalls = 0
 let clickInfo = null // overrides the click probe's answer (covered / forced cases)
+let domHtml = '<html></html>'
 let tabSeq = 100
 let groupSeq = 500
+
+// "(<script source>)(<json args>)" → the parsed args, or null for another expression
+function scriptCall(expr, name) {
+  const head = '(' + SRC[name] + ')('
+  if (!expr.startsWith(head)) return null
+  return JSON.parse('[' + expr.slice(head.length, -1) + ']')
+}
+
+function fakePage(op, arg) {
+  switch (op) {
+    case 'click': return clickInfo || { x: 50, y: 60, disabled: false }
+    case 'fill': return { ok: true, value: arg.value }
+    case 'get': return 'Hello'
+    case 'clip': return { x: 0, y: 0, width: 100, height: 100, dpr: 1 }
+    case 'storage': return arg.sub === 'get' ? 'v' : true
+    case 'dom': return domHtml
+    default: return true // focus, scroll, exists, has-text
+  }
+}
 
 function fakeDebugSend(m) {
   const { method, params } = m
@@ -52,22 +85,24 @@ function fakeDebugSend(m) {
   if (method === 'Input.dispatchKeyEvent') keyEvents.push(params)
   if (method === 'Runtime.evaluate') {
     const expr = params.expression
-    if (expr.includes('markdown')) return { result: { value: { title: 'Example Page', url: 'http://localhost:3000', markdown: '# Example\n\nHello **world**' } } }
-    if (expr.includes('__cbRefSeq')) {
-      const value = expr.includes('"find"')
+    if (scriptCall(expr, 'md')) return { result: { value: { title: 'Example Page', url: 'http://localhost:3000', markdown: '# Example\n\nHello **world**' } } }
+    const pg = scriptCall(expr, 'page')
+    if (pg) {
+      const value = pg[0].find
         ? [1, 2, 3].map((i) => ({ ref: 'e' + i, tag: 'button', role: 'button', text: 'Go' }))
-        : { title: 'Example', url: 'http://localhost:3000', elements: [{ ref: 'e1', tag: 'button', role: 'button', text: 'Go' }] }
+        : { title: 'Example', url: 'http://localhost:3000/?token=SECRET1', elements: [{ ref: 'e1', tag: 'button', role: 'button', text: 'Go' }, { ref: 'e2', tag: 'a', role: 'link', text: 'x', href: 'http://a.test/?api_key=SECRET2' }] }
       return { result: { value } }
     }
-    if (expr.includes('elementFromPoint')) return { result: { value: clickInfo || { x: 50, y: 60, disabled: false } } }
-    if (expr.includes('isContentEditable')) return { result: { value: { ok: true, value: 'me@example.com' } } }
-    if (expr.includes('indexOf')) return { result: { value: true } }
-    if (expr.includes('innerText')) return { result: { value: 'Hello' } }
-    if (expr.includes('scrollIntoView')) return { result: { value: { x: 50, y: 60, disabled: false } } }
-    if (expr.includes('getBoundingClientRect')) return { result: { value: { x: 50, y: 60, disabled: false } } }
-    return { result: { value: true } }
+    if (expr === '(' + SRC.actions + ')') { actionsInstalls++; return { result: { type: 'function', objectId: 'actions-1' } } }
+    return { result: { value: true } } // eval / wait --fn
+  }
+  if (method === 'Runtime.callFunctionOn') {
+    const act = params.arguments.map((a) => a.value)
+    pageOps.push(act)
+    return { result: { value: fakePage(act[0], act[1] || {}) } }
   }
   if (method === 'Page.captureScreenshot') return { data: 'Zm9vYmFy' }
+  if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'main' } } }
   return {}
 }
 
@@ -75,7 +110,7 @@ let ws
 const fakeExtReady = new Promise((resolve, reject) => {
   const tryConnect = (attempt) => {
     ws = new WebSocket(`ws://127.0.0.1:${PORT}`, { headers: { Origin: EXT_ORIGIN } })
-    ws.on('open', () => { ws.send(JSON.stringify({ event: 'hello' })); resolve() })
+    ws.on('open', () => { ws.send(JSON.stringify({ event: 'hello', code: CODE })); resolve() })
     ws.on('error', () => { setTimeout(() => tryConnect(attempt + 1), 200) })
     attachHandlers()
     if (attempt > 50) reject(new Error('fake ext could not connect'))
@@ -99,11 +134,6 @@ function attachHandlers() {
 
 function fakeHandle(m) {
   switch (m.cmd) {
-    case 'groups.get': {
-      const g = groups.get(m.groupId)
-      if (!g) throw new Error('no such group')
-      return g
-    }
     case 'groups.query': {
       const all = [...groups.values()]
       return m.query && m.query.title ? all.filter((g) => g.title === m.query.title) : all
@@ -130,6 +160,7 @@ function fakeHandle(m) {
       return t
     }
     case 'tabs.update': {
+      tabUpdates.push(m.props)
       const t = tabs.get(m.tabId)
       Object.assign(t, m.props)
       t.status = 'complete'
@@ -143,17 +174,18 @@ function fakeHandle(m) {
     case 'tabs.reload': { tabs.get(m.tabId).status = 'complete'; return {} }
     case 'tabs.goBack': case 'tabs.goForward': return {}
     case 'windows.update': return {}
-    case 'debug.attach': return {}
+    case 'debug.attach': attachCalls.push(m.tabId); return sleep(50).then(() => ({}))
+    case 'debug.detach': return {}
     case 'debug.send': return fakeDebugSend(m)
     default: throw new Error('fake ext: unknown cmd ' + m.cmd)
   }
 }
 
-function fakeExtConnect() {
+function fakeExtConnect(code = CODE) {
   return new Promise((resolve) => {
     const tryC = (n) => {
       ws = new WebSocket(`ws://127.0.0.1:${PORT}`, { headers: { Origin: EXT_ORIGIN } })
-      ws.on('open', () => { ws.send(JSON.stringify({ event: 'hello' })); resolve() })
+      ws.on('open', () => { ws.send(JSON.stringify({ event: 'hello', code })); resolve() })
       ws.on('error', () => { setTimeout(() => tryC(n + 1), 200) })
       attachHandlers()
     }
@@ -173,8 +205,7 @@ async function main() {
     stdio: ['ignore', 'inherit', 'inherit'],
   })
   daemon.unref()
-  await sleep(400)
-  await fakeExtReady
+  await fakeExtReady // retries until the daemon listens
 
   // 0. extension-path points at the folder to load unpacked
   let r0 = await run(['extension-path'])
@@ -223,15 +254,15 @@ async function main() {
   ok(r.code === 0 && r.out.includes('route added'), 'network route', JSON.stringify({code: r.code, out: r.out, err: r.err}))
   ok(cdpCalls.includes('Fetch.enable'), 'Fetch.enable applied')
   fakeEvent({ method: 'Fetch.requestPaused', params: { requestId: 'req-1', resourceType: 'XHR', request: { method: 'GET', url: 'https://api.example.com/users' } } })
-  await sleep(300)
-  ok(cdpCalls.includes('Fetch.failRequest'), 'route --abort → Fetch.failRequest')
+  ok(await until(() => cdpCalls.includes('Fetch.failRequest')), 'route --abort → Fetch.failRequest')
   r = await run(['-s', 'feat-a', 'network', 'requests'])
   ok(r.code === 0 && r.out.includes('blocked'), 'network requests shows blocked', JSON.stringify({code: r.code, out: r.out, err: r.err}))
 
   // 9. console + errors events
   fakeEvent({ method: 'Runtime.consoleAPICalled', params: { type: 'log', args: [{ type: 'string', value: 'hi from page' }] } })
   fakeEvent({ method: 'Runtime.exceptionThrown', params: { exceptionDetails: { text: 'Uncaught TypeError', exception: { description: 'Uncaught TypeError: x is not a function' } } } })
-  await sleep(300)
+  // (events share the socket with the fake's rpc replies, so the daemon has
+  // handled them before the next command gets its first reply: no wait needed)
   r = await run(['-s', 'feat-a', 'console'])
   ok(r.code === 0 && r.out.includes('hi from page'), 'console', JSON.stringify({code: r.code, out: r.out, err: r.err}))
   r = await run(['-s', 'feat-a', 'errors'])
@@ -241,27 +272,23 @@ async function main() {
   r = await run(['-s', 'feat-a', 'network', 'route', 'mock.example.com/*', '--body', '{"ok":1}'])
   ok(r.code === 0 && r.out.includes('route added'), 'mock route added', JSON.stringify(r))
   fakeEvent({ method: 'Fetch.requestPaused', params: { requestId: 'req-2', resourceType: 'Fetch', request: { method: 'GET', url: 'https://mock.example.com/api' } } })
-  await sleep(300)
-  ok(cdpCalls.includes('Fetch.fulfillRequest:200'), 'route --body → Fetch.fulfillRequest', JSON.stringify(cdpCalls.slice(-20)))
+  ok(await until(() => cdpCalls.includes('Fetch.fulfillRequest:200')), 'route --body → Fetch.fulfillRequest', JSON.stringify(cdpCalls.slice(-20)))
 
   // 9b2. preflights for mocked URLs are answered with echoed CORS headers
   fakeEvent({ method: 'Fetch.requestPaused', params: { requestId: 'req-3', resourceType: 'Preflight', request: { method: 'OPTIONS', url: 'https://mock.example.com/api', headers: { Origin: 'http://localhost:3000', 'Access-Control-Request-Method': 'POST', 'Access-Control-Request-Headers': 'content-type' } } } })
-  await sleep(300)
-  ok(cdpCalls.includes('Fetch.fulfillRequest:204'), 'mocked URL preflight → 204 with echoed CORS headers', JSON.stringify(cdpCalls.slice(-20)))
+  ok(await until(() => cdpCalls.includes('Fetch.fulfillRequest:204')), 'mocked URL preflight → 204 with echoed CORS headers', JSON.stringify(cdpCalls.slice(-20)))
 
   // 9b3. --status without --body fulfills; --times 1 expires after one match
   r = await run(['-s', 'feat-a', 'network', 'route', 'once.test/*', '--status', '409', '--times', '1'])
   ok(r.code === 0 && r.out.includes('route added'), 'route --status 409 --times 1 (no --body)', JSON.stringify(r))
   fakeEvent({ method: 'Fetch.requestPaused', params: { requestId: 'req-4', resourceType: 'XHR', request: { method: 'POST', url: 'https://once.test/api' } } })
-  await sleep(300)
-  ok(cdpCalls.includes('Fetch.fulfillRequest:409'), '--status alone fulfills with an empty body', JSON.stringify(cdpCalls.slice(-20)))
+  ok(await until(() => cdpCalls.includes('Fetch.fulfillRequest:409')), '--status alone fulfills with an empty body', JSON.stringify(cdpCalls.slice(-20)))
   fakeEvent({ method: 'Fetch.requestPaused', params: { requestId: 'req-5', resourceType: 'XHR', request: { method: 'POST', url: 'https://once.test/api' } } })
-  await sleep(300)
-  ok(cdpCalls.includes('Fetch.continueRequest'), '--times 1 consumed → the next request continues', JSON.stringify(cdpCalls.slice(-20)))
+  ok(await until(() => cdpCalls.includes('Fetch.continueRequest')), '--times 1 consumed → the next request continues', JSON.stringify(cdpCalls.slice(-20)))
 
   // 9b4. token-like query params are redacted unless --raw
   fakeEvent({ method: 'Network.requestWillBeSent', params: { requestId: 'req-6', request: { method: 'GET', url: 'https://x.test/sse?token=eyJhbGciOiJIUzI1NiJ9.SECRET.SIG' } } })
-  await sleep(200)
+  fakeEvent({ method: 'Network.loadingFinished', params: { requestId: 'req-6' } })
   r = await run(['-s', 'feat-a', 'network', 'requests', '--filter', 'x.test'])
   ok(r.code === 0 && r.out.includes('[REDACTED]') && !r.out.includes('SECRET.SIG'), 'token query params redacted', JSON.stringify(r))
   r = await run(['-s', 'feat-a', 'network', 'requests', '--filter', 'x.test', '--raw'])
@@ -317,19 +344,125 @@ async function main() {
   r = await run(['-s', 'feat-a', 'back'])
   ok(r.code === 0 && r.out.includes('navigated back'), 'back', JSON.stringify(r))
 
-  // 9z. only our own extension may connect or act as the bridge
-  const probe = (origin) => new Promise((resolve) => {
-    const c = new WebSocket(`ws://127.0.0.1:${PORT}`, origin ? { headers: { Origin: origin } } : {})
+  // 9f. regressions: redaction, piped output, literal text, unknown flags, url normalization
+  r = await run(['-s', 'feat-a', 'snapshot'])
+  ok(r.code === 0 && !r.out.includes('SECRET1') && !r.out.includes('SECRET2') && r.out.includes('[REDACTED]'), 'snapshot redacts token-like url params', JSON.stringify(r))
+  r = await run(['-s', 'feat-a', 'snapshot', '--raw'])
+  ok(r.code === 0 && r.out.includes('SECRET2'), 'snapshot --raw keeps them')
+  domHtml = '<html>' + 'x'.repeat(300000) + '</html>'
+  r = await run(['-s', 'feat-a', 'dom', '--limit', '1000000'])
+  ok(r.code === 0 && r.out.length > domHtml.length, `piped output is not truncated (${r.out.length} chars)`)
+  domHtml = '<html></html>'
+  r = await run(['-s', 'feat-a', 'fill', '#q', '--', '--verbose'])
+  ok(r.code === 0 && pageOps.at(-1)[1].value === '--verbose', 'text after -- is literal', JSON.stringify({ r, op: pageOps.at(-1) }))
+  r = await run(['-s', 'feat-a', 'fill', '#q', '-a'])
+  ok(r.code === 0 && pageOps.at(-1)[1].value === '-a', '"-a" is text, not a flag', JSON.stringify(pageOps.at(-1)))
+  r = await run(['-s', 'feat-a', 'click', '#q', '--forse'])
+  ok(r.code === 1 && r.err.includes('unknown flag --forse'), 'unknown flags are rejected', JSON.stringify(r))
+  r = await run(['-s', 'feat-a', 'click', '@e1"]\')'])
+  ok(r.code === 0 && pageOps.at(-1)[1].sel === '@e1"]\')', 'selectors reach the page as data, not code', JSON.stringify(pageOps.at(-1)))
+  r = await run(['-s', 'feat-a', 'storage', 'set', 'local', 'k', 'v'])
+  ok(r.code === 0 && r.out.includes('set localStorage.k'), 'storage set reports a set, not a clear', JSON.stringify(r))
+  r = await run(['-s', 'feat-a', 'storage', 'nuke', 'local', 'k'])
+  ok(r.code === 1 && r.err.includes('usage'), 'unknown storage op is an error, not a removeItem', JSON.stringify(r))
+  r = await run(['-s', 'new-url', 'open', 'localhost:3000'])
+  const created = [...tabs.values()].find((t) => groups.get(t.groupId)?.title === 'new-url')
+  ok(r.code === 0 && created && created.url === 'http://localhost:3000', 'open localhost:3000 on a new session → http://localhost:3000', JSON.stringify({ r, url: created && created.url }))
+  r = await run(['open', 'example.com'], { CTRL_BROWSE_SESSION: 'new-url' })
+  ok(r.code === 0 && cdpCalls.includes('Page.navigate'), 'CTRL_BROWSE_SESSION is honored', JSON.stringify(r))
+  await run(['-s', 'new-url', 'close'])
+
+  // 9g. races: parallel commands on a new session → one group, one debugger attach
+  attachCalls.length = 0
+  const rs = await Promise.all([1, 2, 3].map(() => run(['-s', 'racy', 'eval', '1'])))
+  const racyGroups = [...groups.values()].filter((x) => x.title === 'racy')
+  const racyTab = [...tabs.values()].find((t) => t.groupId === racyGroups[0]?.id)
+  ok(rs.every((x) => x.code === 0) && racyGroups.length === 1, 'parallel commands create one tab group', JSON.stringify({ rs, n: racyGroups.length }))
+  ok(attachCalls.filter((id) => id === racyTab?.id).length === 1, 'parallel commands attach the debugger once', JSON.stringify(attachCalls))
+  await run(['-s', 'racy', 'close'])
+
+  // 9h. a user's own tab group is never adopted
+  groups.set(9999, { id: 9999, title: 'Personal' })
+  r = await run(['-s', 'Personal', 'eval', '1'])
+  ok(r.code === 1 && r.err.includes('did not create'), "a user's own group is not adopted", JSON.stringify(r))
+  groups.delete(9999)
+
+  // 9i. parser: short flags only where they mean something, flags only where the command takes them
+  r = await run(['-s', 'feat-a', 'fill', '#q', '-h'])
+  ok(r.code === 0 && pageOps.at(-1)[1].value === '-h', '"-h" after the command is text', JSON.stringify({ r, op: pageOps.at(-1) }))
+  r = await run(['-s', 'feat-a', 'click', '#x', '--text', 'foo'])
+  ok(r.code === 1 && r.err.includes('not a flag of "click"'), 'a flag the command does not take is an error', JSON.stringify(r))
+  r = await run(['-s', 'feat-a', 'frobnicate'])
+  ok(r.code === 1 && r.err.includes('unknown command'), 'unknown commands fail before reaching the daemon', JSON.stringify(r))
+  const installs = actionsInstalls
+  await run(['-s', 'feat-a', 'get', 'text', 'h1'])
+  await run(['-s', 'feat-a', 'get', 'text', 'h1'])
+  ok(actionsInstalls === installs, 'actions.js is installed once per page context, not re-sent per call', `${installs} → ${actionsInstalls}`)
+
+  // 9j. pages Chrome won't let extensions debug
+  attachCalls.length = 0
+  r = await run(['-s', 'chrome-x', 'open', 'chrome://version'])
+  const chromeTab = [...tabs.values()].find((t) => groups.get(t.groupId)?.title === 'chrome-x')
+  ok(r.code === 0 && r.out.includes('navigated only') && !attachCalls.includes(chromeTab?.id), 'open chrome://… on a new session works without the debugger', JSON.stringify({ r, attachCalls }))
+  r = await run(['-s', 'chrome-x', 'goto', 'chrome://settings'])
+  ok(r.code === 0 && tabUpdates.at(-1)?.url === 'chrome://settings', 'goto chrome://… navigates with chrome.tabs', JSON.stringify({ r, last: tabUpdates.at(-1) }))
+  await run(['-s', 'chrome-x', 'close'])
+
+  // 9k. network idle: requests in flight hold it off; abandoned ones don't
+  fakeEvent({ method: 'Network.requestWillBeSent', params: { requestId: 'slow-1', type: 'Fetch', request: { method: 'GET', url: 'https://slow.test/a' } } })
+  r = await run(['-s', 'feat-a', 'wait', '--network-idle', '100', '--timeout', '600'])
+  ok(r.code === 1 && r.err.includes('timed out'), 'an in-flight request holds network-idle off', JSON.stringify(r))
+  fakeEvent({ method: 'Network.loadingFinished', params: { requestId: 'slow-1' } })
+  r = await run(['-s', 'feat-a', 'wait', '--network-idle', '100', '--timeout', '3000'])
+  ok(r.code === 0 && r.out.includes('network idle'), 'network idle once it finishes', JSON.stringify(r))
+  fakeEvent({ method: 'Network.requestWillBeSent', params: { requestId: 'slow-2', type: 'Fetch', request: { method: 'GET', url: 'https://slow.test/b' } } })
+  ws.send(JSON.stringify({ event: 'debugDetached', tabId: [...tabs.keys()][0] }))
+  r = await run(['-s', 'feat-a', 'wait', '--network-idle', '100', '--timeout', '3000'])
+  ok(r.code === 0, 'requests abandoned by a detach do not hold network-idle off', JSON.stringify(r))
+
+  // 9l. group ownership: lost with its window → still ours; removed by the user → name is free
+  const loseGroup = (title, windowClosing) => {
+    const g = [...groups.values()].find((x) => x.title === title)
+    for (const t of [...tabs.values()]) {
+      if (t.groupId !== g.id) continue
+      tabs.delete(t.id)
+      ws.send(JSON.stringify({ event: 'tabs.onRemoved', tabId: t.id, windowClosing }))
+    }
+    groups.delete(g.id)
+    ws.send(JSON.stringify({ event: 'groups.onRemoved', groupId: g.id }))
+  }
+  const restoreGroup = (title) => { // a group with this title appears (window restored, or the user made one)
+    const g = { id: ++groupSeq, title }
+    groups.set(g.id, g)
+    const t = { id: ++tabSeq, url: 'about:blank', title: 'Tab', status: 'complete', index: tabs.size, windowId: 1, groupId: g.id }
+    tabs.set(t.id, t)
+  }
+  await run(['-s', 'win-x', 'eval', '1'])
+  loseGroup('win-x', true)
+  restoreGroup('win-x')
+  r = await run(['-s', 'win-x', 'eval', '1'])
+  ok(r.code === 0, 'a group lost with its window is re-bound when restored', JSON.stringify(r))
+  await run(['-s', 'win-x', 'close'])
+  await run(['-s', 'del-x', 'eval', '1'])
+  loseGroup('del-x', false)
+  restoreGroup('del-x')
+  r = await run(['-s', 'del-x', 'eval', '1'])
+  ok(r.code === 1 && r.err.includes('did not create'), 'after the user removes a group, a new group with that title is theirs', JSON.stringify(r))
+
+  // 9z. only our own extension may act as the bridge; local clients connect without credentials
+  const probe = (headers) => new Promise((resolve) => {
+    const c = new WebSocket(`ws://127.0.0.1:${PORT}`, { headers })
     c.on('open', () => { c.close(); resolve(true) })
     c.on('error', () => resolve(false))
   })
-  ok(!(await probe('chrome-extension://abcdefghijklmnopabcdefghijklmnop')), 'other extensions are refused')
-  ok(!(await probe('http://evil.test')), 'web pages are refused')
+  ok(!(await probe({ Origin: 'chrome-extension://abcdefghijklmnopabcdefghijklmnop' })), 'other extensions are refused')
+  ok(!(await probe({ Origin: 'http://evil.test' })), 'web pages are refused')
+  ok(await probe({}), 'local clients connect (no token — see README "Security model")')
   const impostor = new WebSocket(`ws://127.0.0.1:${PORT}`)
-  await new Promise((r) => impostor.on('open', r))
+  await new Promise((r, j) => { impostor.on('open', r); impostor.on('error', j) })
   impostor.send(JSON.stringify({ event: 'hello' }))
   impostor.on('message', () => { failures++; console.error('FAIL - impostor received a bridge rpc') })
-  await sleep(100)
+  await sleep(100) // a negative check: give a takeover the chance to happen
   r = await run(['-s', 'feat-a', 'eval', '1'])
   impostor.close()
   ok(r.code === 0, 'a no-origin "hello" cannot take over the bridge', JSON.stringify(r))
@@ -344,26 +477,39 @@ async function main() {
   r = await run(['-s', 'feat-a', 'sessions'])
   ok(r.code === 0 && !r.out.includes('feat-a'), 'sessions list empty after close', JSON.stringify({code: r.code, out: r.out, err: r.err}))
 
-  // 12. session rebind after daemon restart
+  // 12. a daemon whose code changed on disk refuses the command and exits
   await run(['-s', 'rebind-x', 'eval', '1'])
-  daemon.kill() // SIGTERM → quit() flushes state before exiting
-  await sleep(500)
+  const exited = new Promise((resolve) => daemon.on('exit', resolve))
+  const stale = await new Promise((resolve) => {
+    const c = new WebSocket(`ws://127.0.0.1:${PORT}`)
+    c.on('open', () => c.send(JSON.stringify({ type: 'cli', id: 's1', code: 'not-this-code', session: 'rebind-x', cmd: 'eval', args: ['1'], flags: {} })))
+    c.on('message', (d) => { c.close(); resolve(JSON.parse(String(d))) })
+  })
+  ok(stale.ok === false && stale.stale === true, 'a CLI with other code gets "stale"', JSON.stringify(stale))
+  ok(await until(() => exited.then(() => true), 5000), 'the stale daemon exits (state flushed)')
+
+  // 13. session rebind after daemon + "Chrome" restart (new group ids)
+  const old = [...groups.values()].find((x) => x.title === 'rebind-x')
+  groups.delete(old.id); old.id = ++groupSeq; groups.set(old.id, old)
+  for (const t of tabs.values()) if (t.groupId !== undefined && !groups.has(t.groupId)) t.groupId = old.id
   daemon2 = spawn(process.execPath, [DAEMON], {
     env: { ...process.env, CTRL_BROWSE_PORT: String(PORT) },
     stdio: ['ignore', 'inherit', 'inherit'],
   })
   daemon2.unref()
-  await sleep(400)
+  await fakeExtConnect('0123456789abcdef') // an extension Chrome loaded before the files changed
+  r = await run(['-s', 'rebind-x', 'eval', '1'])
+  ok(r.code === 1 && r.err.includes('older ctrl-browse extension'), 'an extension running older code is refused', JSON.stringify(r))
   await fakeExtConnect()
-  r = await run(['-s', 'rebind-x', 'sessions'])
-  ok(r.code === 0 && r.out.includes('rebind-x'), 'session rebound from tab group title after restart', JSON.stringify(r))
+  const before = groups.size
+  r = await run(['-s', 'rebind-x', 'eval', '1'])
+  ok(r.code === 0 && groups.size === before, 'session re-bound by title after restart (no new group)', JSON.stringify(r))
   r = await run(['-s', 'rebind-x', 'close'])
   ok(r.code === 0 && r.out.includes('closed'), 'rebind session closed')
 
   // teardown
   await run(['shutdown']).catch(() => {})
-  await sleep(300)
-  daemon.kill()
+  daemon2.kill()
 
   fs.rmSync(HOME, { recursive: true, force: true })
   if (failures) { console.error(`\n${failures} failure(s)`); process.exit(1) }
