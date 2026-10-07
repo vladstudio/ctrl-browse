@@ -1,6 +1,7 @@
 ---
 name: ctrl-browse
-description: Drive the user's real Chrome (their profile, logins and cookies) from the shell with the ctrl-browse CLI. Use to open pages, read them as markdown, click, fill forms, take screenshots, inspect console errors and network traffic, or mock API responses — e.g. to check a local dev server or reproduce a bug in a logged-in app. Triggers: "in my browser", "the site I'm logged into", "check localhost". Not for headless/CI testing (use Playwright).
+description: >-
+  Drive the user's real Chrome (their profile, logins and cookies) from the shell with the ctrl-browse CLI. Use to open pages, read them as markdown, click, fill forms, take screenshots, inspect console errors and network traffic, or mock API responses — e.g. to check a local dev server or reproduce a bug in a logged-in app. Triggers: "in my browser", "the site I'm logged into", "check localhost". Not for headless/CI testing (use Playwright).
 ---
 
 # ctrl-browse

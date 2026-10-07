@@ -18,3 +18,11 @@ test('the stamp ignores the port line', () => {
   const src = fs.readFileSync(BRIDGE_FILE, 'utf8')
   expect(bridgeHash(src.replace(/const PORT = \d+/, 'const PORT = 9999'))).toBe(bridgeHash(src))
 })
+
+test('skill/SKILL.md frontmatter is valid YAML with name and description', async () => {
+  const { YAML } = await import('bun')
+  const src = fs.readFileSync(new URL('../skill/SKILL.md', import.meta.url), 'utf8')
+  const meta = YAML.parse(src.split('---')[1])
+  expect(meta.name).toBe('ctrl-browse')
+  expect(meta.description).toContain('Triggers: "in my browser"')
+})
