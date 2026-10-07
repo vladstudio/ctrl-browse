@@ -1,4 +1,6 @@
-# ctrl-browse
+<p align="center"><img src="assets/icon-256.png" width="128" height="128" alt="ctrl-browse"></p>
+
+<h1 align="center">ctrl-browse</h1>
 
 Let AI agents (and you) drive your **real** Chrome from the command line: your
 profile, your logins, your extensions. No bundled browser, no headless mode, no

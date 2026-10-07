@@ -4,6 +4,7 @@
   "version": "1.2.0",
   "description": "Bridge for the ctrl-browse CLI — drives tabs via chrome.debugger",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzwac9/BnB1v8iUDMdu2TEdt7cn37/xNXZAFbUL+aMKsQ06pTZdIq/0GmujrqTz7D3xegzaMIe7RF96hWYeVJ9VI4BKMDeQH3DlEzbwoVogroHhUGMBhxQwoMIf7PsPdm8/hEi3oqQMK3VxksCn7OAAAxwkgZelIdV4IxcvgPbNx4qnTsDX4dZ6ZgEu/WHo9FbH7FjSWgqAC2wflaUdyV6WZF2nqc2x5MYlET9ig9a+QQJMKb2dv6JlEEcDc0dJMNl0Rhg0y25KcKrN70z0paLipjyubwJAqN3/wnHvM+1bpbni/LV8ee63TK9OHUv5fRYOeNqyymwsd+cFnMPt/fIwIDAQAB",
+  "icons": { "16": "icons/icon-16.png", "32": "icons/icon-32.png", "48": "icons/icon-48.png", "128": "icons/icon-128.png" },
   "minimum_chrome_version": "116",
   "permissions": ["debugger", "tabs", "tabGroups", "alarms"],
   "host_permissions": ["<all_urls>"],
