@@ -3,9 +3,9 @@
 <h1 align="center">ctrl-browse</h1>
 
 CLI for AI agents (and you) to drive your **real** Chrome: your profile,
-logins, extensions. No bundled browser, no headless mode, no debug flags.
+logins, extensions. No bundled browser, no headless mode, no debug flags. Made to fit my specific use-cases.
 
-Each **session** is a **Chrome tab group** of the same name, so agents work
+Each **session** is a **tab group** of the same name, so agents work
 side by side without touching each other's tabs or yours.
 
 <p align="center"><img src="assets/screenshot.png" alt="ctrl-browse driving a browser session from the terminal"></p>
@@ -17,26 +17,18 @@ ctrl-browse -s feature-a click @e3
 ctrl-browse -s feature-a close                 # closes group, ends session
 ```
 
-> [!WARNING]
 > Whatever runs ctrl-browse **controls your everyday browser**: every
-> logged-in site, page JavaScript, cookies, network traffic. Use only trusted
-> agents; consider a separate Chrome profile. See [Security](#security).
-
-## Why not Playwright MCP / chrome-devtools-mcp?
-
-They launch a separate browser or need `--remote-debugging-port`, so the agent
-starts logged out. ctrl-browse runs in your open Chrome, SSO apps included.
-Tab groups keep its work visible; take over anytime.
+> logged-in site, page JavaScript, cookies, network traffic. 
+> That's by design. See [Security](#security).
 
 ## Install
 
-**Node 20+** (or Bun), **Chrome 116+**. Other Chromium browsers with tab
-groups: untested.
+**Node 20+** (or Bun), **Chrome 116+**.
 
 ```bash
 git clone https://github.com/vladstudio/ctrl-browse.git
 cd ctrl-browse
-npm install && npm link   # bun: bun install && bun link
+npm install && npm link   # or: bun install && bun link
 ```
 
 Extension: `chrome://extensions` → **Developer mode** (top right) → **Load
@@ -221,7 +213,7 @@ So:
 ## Uninstall
 
 ```bash
-npm unlink -g ctrl-browse   # bun: bun unlink
+npm unlink -g ctrl-browse   # or: bun unlink
 rm -rf ~/.ctrl-browse       # optional: state and logs
 ```
 
