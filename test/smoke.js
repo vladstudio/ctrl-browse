@@ -3,6 +3,7 @@
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
+import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import WebSocket from 'ws'
 
@@ -10,6 +11,10 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 const CLI = path.join(HERE, '..', 'bin', 'ctrl-browse.js')
 const DAEMON = path.join(HERE, '..', 'src', 'daemon.js')
 const PORT = 9900 + Math.floor(Math.random() * 400)
+// keep the test daemon's state file out of the real ~/.ctrl-browse
+const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'ctrl-browse-test-'))
+process.env.HOME = HOME
+const { EXT_ORIGIN } = await import('../src/daemon/util.js')
 
 let failures = 0
 function ok(cond, msg, detail) {
@@ -69,7 +74,7 @@ function fakeDebugSend(m) {
 let ws
 const fakeExtReady = new Promise((resolve, reject) => {
   const tryConnect = (attempt) => {
-    ws = new WebSocket(`ws://127.0.0.1:${PORT}`)
+    ws = new WebSocket(`ws://127.0.0.1:${PORT}`, { headers: { Origin: EXT_ORIGIN } })
     ws.on('open', () => { ws.send(JSON.stringify({ event: 'hello' })); resolve() })
     ws.on('error', () => { setTimeout(() => tryConnect(attempt + 1), 200) })
     attachHandlers()
@@ -147,7 +152,7 @@ function fakeHandle(m) {
 function fakeExtConnect() {
   return new Promise((resolve) => {
     const tryC = (n) => {
-      ws = new WebSocket(`ws://127.0.0.1:${PORT}`)
+      ws = new WebSocket(`ws://127.0.0.1:${PORT}`, { headers: { Origin: EXT_ORIGIN } })
       ws.on('open', () => { ws.send(JSON.stringify({ event: 'hello' })); resolve() })
       ws.on('error', () => { setTimeout(() => tryC(n + 1), 200) })
       attachHandlers()
@@ -170,6 +175,10 @@ async function main() {
   daemon.unref()
   await sleep(400)
   await fakeExtReady
+
+  // 0. extension-path points at the folder to load unpacked
+  let r0 = await run(['extension-path'])
+  ok(r0.code === 0 && fs.existsSync(path.join(r0.out.trim(), 'manifest.json')), 'extension-path')
 
   // 1. goto creates the session + tab group
   let r = await run(['-s', 'feat-a', 'goto', 'http://localhost:3000'])
@@ -308,6 +317,23 @@ async function main() {
   r = await run(['-s', 'feat-a', 'back'])
   ok(r.code === 0 && r.out.includes('navigated back'), 'back', JSON.stringify(r))
 
+  // 9z. only our own extension may connect or act as the bridge
+  const probe = (origin) => new Promise((resolve) => {
+    const c = new WebSocket(`ws://127.0.0.1:${PORT}`, origin ? { headers: { Origin: origin } } : {})
+    c.on('open', () => { c.close(); resolve(true) })
+    c.on('error', () => resolve(false))
+  })
+  ok(!(await probe('chrome-extension://abcdefghijklmnopabcdefghijklmnop')), 'other extensions are refused')
+  ok(!(await probe('http://evil.test')), 'web pages are refused')
+  const impostor = new WebSocket(`ws://127.0.0.1:${PORT}`)
+  await new Promise((r) => impostor.on('open', r))
+  impostor.send(JSON.stringify({ event: 'hello' }))
+  impostor.on('message', () => { failures++; console.error('FAIL - impostor received a bridge rpc') })
+  await sleep(100)
+  r = await run(['-s', 'feat-a', 'eval', '1'])
+  impostor.close()
+  ok(r.code === 0, 'a no-origin "hello" cannot take over the bridge', JSON.stringify(r))
+
   // 10. missing session → error
   r = await run(['goto', 'http://x'])
   ok(r.code === 1 && r.err.includes('missing session'), 'missing -s → error exit 1', JSON.stringify({code: r.code, out: r.out, err: r.err}))
@@ -339,6 +365,7 @@ async function main() {
   await sleep(300)
   daemon.kill()
 
+  fs.rmSync(HOME, { recursive: true, force: true })
   if (failures) { console.error(`\n${failures} failure(s)`); process.exit(1) }
   console.log('\nall smoke tests passed')
   process.exit(0)

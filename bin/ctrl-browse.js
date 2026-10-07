@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 // ctrl-browse CLI — connects to the local daemon (starts it if needed) and
 // runs one command scoped to a named session.
 
@@ -10,7 +10,9 @@ import { fileURLToPath } from 'node:url'
 import WebSocket from 'ws'
 
 const PORT = parseInt(process.env.CTRL_BROWSE_PORT || '9876', 10)
-const DAEMON_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'daemon.js')
+const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
+const DAEMON_PATH = path.join(ROOT, 'src', 'daemon.js')
+const EXTENSION_PATH = path.join(ROOT, 'src', 'extension')
 const PLIST = path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.ctrl-browse.daemon.plist')
 
 const VALUE_FLAGS = new Set([
@@ -54,6 +56,7 @@ sessions:
   close                           close session (closes its tab group)
   status                          daemon + browser status
   daemon install|uninstall        run daemon as a login service (macOS launchagent)
+  extension-path                  folder to "Load unpacked" in chrome://extensions
 
 navigation:
   open <url> | goto <url>         navigate; goto responds with page as markdown
@@ -123,6 +126,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 // run the daemon as a login service (macOS) so it's always listening —
 // kills the ERR_CONNECTION_REFUSED noise the extension logs while it's off
 async function daemonCmd(sub) {
+  if (process.platform !== 'darwin') { console.error('error: daemon install is macOS-only — elsewhere the daemon auto-starts on demand'); process.exit(1) }
   const uid = process.getuid()
   const bootout = () => { try { execSync(`launchctl bootout gui/${uid} ${PLIST}`, { stdio: 'ignore' }) } catch {} }
   if (sub === 'uninstall') {
@@ -167,9 +171,10 @@ function connect(timeoutMs) {
 
 async function main() {
   const { cmd, args, flags, session } = parse(process.argv.slice(2))
-  if (flags.version || flags.v) { console.log(JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8')).version); process.exit(0) }
+  if (flags.version || flags.v) { console.log(JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version); process.exit(0) }
   if (!cmd || flags.help || cmd === 'help' || flags.h) { console.log(HELP); process.exit(0) }
   if (cmd === 'daemon') { await daemonCmd(args[0]); return }
+  if (cmd === 'extension-path') { console.log(EXTENSION_PATH); process.exit(0) }
 
   let ws
   try {
@@ -195,7 +200,6 @@ async function main() {
   // keep the client timeout above the daemon's 30s browser-connect wait
   const timeout = Math.max(35000, (parseInt(flags.timeout, 10) ? parseInt(flags.timeout, 10) + 15000 : 120000))
   let done = false
-  const finish = (code) => { if (!done) { done = true; process.exit(code) } }
   const timer = setTimeout(() => { console.error('error: command timed out'); process.exit(1) }, timeout)
 
   ws.on('message', async (data) => {

@@ -1,9 +1,12 @@
 # ctrl-browse
 
-Control your **existing** Chrome browser from the CLI — built for AI agents.
-No bundled browser, no headless mode. Every command is scoped to a **named
-session**, and each session is bound to a **Chrome tab group** with the same
-name.
+Let AI agents (and you) drive your **real** Chrome from the command line: your
+profile, your logins, your extensions. No bundled browser, no headless mode, no
+relaunching Chrome with debug flags.
+
+Every command runs in a **named session**, and each session is a **Chrome tab
+group** with that name. Several agents can work side by side without touching
+each other's tabs, or yours.
 
 ```
 ctrl-browse -s feature-a open http://localhost:3000   # creates tab group "feature-a"
@@ -12,69 +15,77 @@ ctrl-browse -s feature-a click @e3
 ctrl-browse -s feature-a close                        # closes the group, cleans the session
 ```
 
-## How it works
+> [!WARNING]
+> ctrl-browse gives whatever runs it **full control of your everyday browser**:
+> every site you're logged into (email, bank, work tools), plus page JavaScript,
+> cookies and network traffic. Only point agents you trust at it, and consider a
+> separate Chrome profile for agent work. The daemon listens only on
+> `127.0.0.1` and accepts only its own extension, but any program on your
+> machine can use the CLI.
 
-```
-CLI ──ws──▶ daemon (127.0.0.1:9876) ──ws──▶ Chrome extension ──▶ chrome.debugger / tabs / tabGroups
-```
+## Why not Playwright MCP / chrome-devtools-mcp?
 
-- **CLI** (`bin/ctrl-browse.js`) — parses the command, sends it to the daemon
-  (auto-spawns the daemon on first use), prints the result.
-- **Daemon** (`src/daemon.js`) — holds session state (tab group id, active tab,
-  labels, logs, routes) and implements all commands via CDP.
-- **Extension** (`src/extension/`) — thin bridge living inside your real
-  browser. Executes `chrome.debugger` (CDP), `chrome.tabs` and
-  `chrome.tabGroups` calls on the daemon's behalf. This is what makes it work
-  with your everyday profile — no `--remote-debugging-port`, no separate
-  `--user-data-dir`, always headed.
-
-Sessions persist in `~/.ctrl-browse/state.json` and re-bind after restarts by
-looking up the tab group by its title.
+Those tools launch a separate browser (or need Chrome started with
+`--remote-debugging-port`), so the agent starts logged out of everything.
+ctrl-browse runs inside the Chrome you already have open: the agent sees exactly
+what you see, including apps behind SSO. Tab groups keep each agent's work
+visible and contained, and you can watch or take over at any time.
 
 ## Install
 
-With **bun** (your runtime — everything is verified to run on Bun, and the CLI
-starts ~4× faster):
+Requires **Node 20+** (or Bun) and **Chrome 116+**. Other Chromium browsers
+with tab groups may work but aren't tested.
 
 ```bash
+git clone https://github.com/vladstudio/ctrl-browse.git
 cd ctrl-browse
-bun install
-bun link             # puts `ctrl-browse` on your PATH (runs via bun)
+npm install
+npm link                 # puts `ctrl-browse` on your PATH (bun: bun install && bun link)
 ```
-
-Node works identically (`npm install -g .` or `npm link`) — the shebang is
-`env bun`, so use `node bin/ctrl-browse.js ...` directly if you ever want node.
-The daemon auto-spawned by the CLI uses the same runtime as the CLI.
 
 Load the extension in Chrome:
 
-1. Open `chrome://extensions`
-2. Enable **Developer mode** (top right)
-3. **Load unpacked** → select the `src/extension` folder
+1. Open `chrome://extensions` and turn on **Developer mode** (top right)
+2. Click **Load unpacked** and pick the folder printed by `ctrl-browse extension-path`
 
-That's it. Chrome can be open or closed; the daemon starts on demand and the
-extension reconnects automatically. Verify with:
+Check it's connected:
 
 ```bash
-ctrl-browse status
+ctrl-browse status       # → browser: connected
 ```
+
+The daemon starts on demand and the extension reconnects to it automatically.
+Chrome can be open or closed when you run commands.
+
+## Use with an AI agent
+
+[`skill/SKILL.md`](skill/SKILL.md) teaches an agent the commands, the core
+loop and the safety rules. For Claude Code:
+
+```bash
+mkdir -p ~/.claude/skills/ctrl-browse
+cp skill/SKILL.md ~/.claude/skills/ctrl-browse/
+```
+
+Other agents (Cursor, Codex, …): paste its contents into your `AGENTS.md` or
+rules file.
 
 ## Session model
 
 - `-s <name>` is **required** (or set `CTRL_BROWSE_SESSION`).
-- First command with an unknown name **auto-creates** the session: it makes a
-  tab group titled `<name>` (colored) containing one tab.
-- Sessions survive daemon restarts (state file) and even Chrome restarts
-  (re-bound by group title).
+- The first command with a new name **creates** the session: a colored tab
+  group titled `<name>` with one tab.
+- Sessions survive daemon restarts and Chrome restarts (re-bound by group
+  title). State lives in `~/.ctrl-browse/state.json`.
 - Deleting the group in Chrome (or closing all its tabs) deletes the session.
 - `close` closes every tab in the group and forgets the session.
-- `tab` commands manage multiple tabs inside one session; each tab can carry a
-  user-assigned `--label`.
+- `tab` commands manage several tabs inside one session; each tab can carry a
+  `--label`.
 
 ## Commands
 
 ```
-sessions | status | shutdown
+sessions | status | shutdown | extension-path
 
 open <url> | goto <url>            # goto replies with page as markdown
 back | forward | reload
@@ -127,58 +138,63 @@ network request <n|id> [--raw]     # token-like params and auth/cookie headers s
 Global flags: `-s/--session <name>`, `--json`, `--limit n`, `--timeout ms`.
 Selectors are CSS selectors; `@eN` refs come from `snapshot`/`find`.
 
-## Agent journey
+## How it works
 
-```bash
-ctrl-browse -s feature-a goto http://localhost:3000     # → page as markdown
-ctrl-browse -s feature-a snapshot -i                    # → @e1 button "Submit" …
-ctrl-browse -s feature-a fill #email "me@example.com"
-ctrl-browse -s feature-a click @e3
-ctrl-browse -s feature-a console                        # → page console
-ctrl-browse -s feature-a network requests --filter api
-ctrl-browse -s feature-a close
 ```
+CLI ──ws──▶ daemon (127.0.0.1:9876) ──ws──▶ Chrome extension ──▶ chrome.debugger / tabs / tabGroups
+```
+
+- **CLI** (`bin/ctrl-browse.js`) parses the command, sends it to the daemon
+  (starting it on first use) and prints the result.
+- **Daemon** (`src/daemon.js` + `src/daemon/`) holds session state (tab group,
+  active tab, labels, logs, mocks) and implements every command over CDP.
+- **Extension** (`src/extension/`) is a thin bridge inside your browser. It
+  runs `chrome.debugger` (CDP), `chrome.tabs` and `chrome.tabGroups` calls for
+  the daemon. That's why it works with your everyday profile and is always
+  headed.
 
 ## Notes & limits
 
-- While the daemon is off, the extension's service worker console shows
-  `ERR_CONNECTION_REFUSED` on each probe — Chrome logs every refused connect
-  attempt and it can't be suppressed from JS. **Avoid it entirely with
-  `ctrl-browse daemon install`** — keeps the daemon running as a login service
-  (KeepAlive), so it's always listening. `ctrl-browse shutdown` unloads it;
-  `ctrl-browse daemon uninstall` reverts to on-demand auto-spawn.
-- While the extension drives a tab, Chrome shows the usual
-  *"ctrl-browse bridge started debugging this browser"* infobar. That's the
-  `chrome.debugger` API doing its job — it's what makes clicks/keys/network
-  interception trusted and reliable.
-- Console/network tracking only covers tabs the extension is attached to
-  (i.e. tabs you've run commands against).
-- `@eN` refs are stable: an element keeps its ref while it stays in the DOM;
-  resnapshot to pick up new elements. Typed passwords and token-like query
-  params never appear in command output (network detail needs `--raw`).
-- Page JS always runs in the main frame's default world — browser-extension
-  iframes (password managers) don't break commands.
-- Opening DevTools on a tab detaches the debugger; the next command
-  re-attaches.
-- The daemon only listens on `127.0.0.1` and rejects browser-page origins.
-  Anything running on your machine can use it — same trust level as a local
-  devtools port.
-- Override the port with `CTRL_BROWSE_PORT` (must match for the extension —
-  port is hardcoded in `src/extension/background.js`; change both if needed).
-- Kill the daemon: `ctrl-browse shutdown` (or `pkill -f ctrl-browse/daemon`).
+- While the extension drives a tab, Chrome shows a *"ctrl-browse bridge started
+  debugging this browser"* bar. That's the `chrome.debugger` API, and it's what
+  makes clicks, keys and network mocks trusted and reliable.
+- While the daemon is off, the extension's service-worker console logs
+  `ERR_CONNECTION_REFUSED` on each reconnect attempt (Chrome logs these and
+  JS can't hide them). On macOS, `ctrl-browse daemon install` keeps the daemon
+  running as a login service so this never happens. `ctrl-browse shutdown`
+  stops it; `ctrl-browse daemon uninstall` goes back to on-demand starts.
+- Console and network tracking only cover tabs you've run commands against.
+- `@eN` refs are stable: an element keeps its ref while it stays in the DOM.
+  Re-snapshot to pick up new elements.
+- Typed passwords and token-like URL params never appear in output; network
+  detail needs `--raw` to show auth headers and cookies.
+- Page JS runs in the main frame's default world, so extension iframes
+  (password managers) don't break commands.
+- Opening DevTools on a tab detaches the debugger; the next command re-attaches.
+- **Security:** the daemon binds to `127.0.0.1` and refuses web pages and every
+  extension except its own (pinned by the `key` in `manifest.json`). Local
+  programs can use it, the same trust level as a local devtools port. If you
+  fork and change the key, the daemon picks up the new ID automatically.
+- Change the port with `CTRL_BROWSE_PORT`. The extension's port is hardcoded in
+  `src/extension/background.js`, so change both.
+- Stop the daemon: `ctrl-browse shutdown`.
 
 ## Uninstall
 
 ```bash
-npm uninstall -g ctrl-browse   # or npm unlink -g
+npm unlink -g ctrl-browse      # or: bun unlink
 # remove the extension at chrome://extensions
-# optional: rm -rf ~/.ctrl-browse
+rm -rf ~/.ctrl-browse          # optional: session state and logs
 ```
 
 ## Development
 
 ```bash
-bun run test    # end-to-end smoke test with a fake extension (no Chrome needed)
-bun test        # unit tests for the in-page scripts (md.js, page.js)
+bun run test        # smoke test (real daemon + CLI, fake extension) and unit tests for the in-page scripts — no Chrome needed
+node test/smoke.js  # smoke test on Node
 bun src/daemon.js   # run the daemon in the foreground
 ```
+
+## License
+
+[MIT](LICENSE)

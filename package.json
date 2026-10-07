@@ -1,12 +1,29 @@
 {
   "name": "ctrl-browse",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Control your existing Chrome browser from the CLI with named sessions bound to tab groups",
+  "keywords": [
+    "chrome",
+    "browser",
+    "automation",
+    "cli",
+    "cdp",
+    "ai-agents",
+    "claude-code"
+  ],
+  "license": "MIT",
+  "author": "Vlad Gerasimov <vlad@vlad.studio>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vladstudio/ctrl-browse.git"
+  },
+  "homepage": "https://github.com/vladstudio/ctrl-browse#readme",
+  "bugs": "https://github.com/vladstudio/ctrl-browse/issues",
   "type": "module",
   "bin": {
     "ctrl-browse": "bin/ctrl-browse.js"
   },
-  "files": ["bin", "src"],
+  "files": ["bin", "src", "skill"],
   "scripts": {
     "start": "bun src/daemon.js",
     "test": "bun test/smoke.js && bun test test/page.test.js"
