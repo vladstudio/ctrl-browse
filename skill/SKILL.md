@@ -1,6 +1,6 @@
 ---
 name: ctrl-browse
-description: Drive the user's real Chrome (their profile, logins and cookies) from the shell with the ctrl-browse CLI. Use to open pages, read them as markdown, click, fill forms, take screenshots, inspect console errors and network traffic, or mock API responses — e.g. to check a local dev server or reproduce a bug in a logged-in app.
+description: Drive the user's real Chrome (their profile, logins and cookies) from the shell with the ctrl-browse CLI. Use to open pages, read them as markdown, click, fill forms, take screenshots, inspect console errors and network traffic, or mock API responses — e.g. to check a local dev server or reproduce a bug in a logged-in app. Triggers: "in my browser", "the site I'm logged into", "check localhost". Not for headless/CI testing (use Playwright).
 ---
 
 # ctrl-browse
@@ -16,8 +16,12 @@ name, so your tabs stay separate from the user's.
 - This is the user's real browser with their real accounts. Never submit
   payments, send messages, delete data or change account settings without the
   user's explicit go-ahead.
+- Stay on task: don't visit or read the user's other sites, tabs or accounts.
 - If a command says the browser is not connected, ask the user to open Chrome
-  with the ctrl-browse extension loaded. Don't retry in a loop.
+  with the ctrl-browse extension loaded. Same if an error blames an extension
+  frame (password manager): ask them to disable it for the site. Don't retry in
+  a loop.
+- Before `close`, undo what you changed: `viewport reset`, `network unroute`.
 
 ## Core loop
 
@@ -40,6 +44,12 @@ ctrl-browse -s task snapshot -i                  # look again after the page cha
 - `fill` sets a value at once (works with React inputs and rich-text editors);
   `type` sends real keystrokes for inputs that react per key (autocomplete,
   mentions).
+- Prefer text (`goto`, `snapshot -i`) over screenshots; screenshot only when
+  visuals matter, cropped with `--el`.
+- Links/popups that open a new tab land outside your group. `goto` the href
+  instead of clicking.
+- If commands start timing out after an action, a native `alert`/`confirm` may
+  be blocking the page; ask the user to dismiss it.
 
 ## Debugging a page
 
