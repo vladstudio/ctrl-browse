@@ -17,7 +17,7 @@ const VALUE_FLAGS = new Set([
   'label', 'body', 'status', 'content-type', 'resource-type', 'filter', 'type', 'method',
   'seed', 'duration', 'steps', 'delay', 'timeout', 'limit', 'text', 'action',
   'times', 'header', 'name', 'fn', 'gone', 'text-gone', 'interval',
-  'scale', 'max-width', 'el', 'dpr', 'nth',
+  'scale', 'max-width', 'el', 'pad', 'dpr', 'nth',
 ])
 const REPEAT_FLAGS = new Set(['header']) // repeatable: --header "K: v" --header "K2: v2"
 
@@ -71,7 +71,7 @@ page:
   dom [--limit n]                 document HTML
   snapshot                        page outline with @refs (refs are stable)
   snapshot -i                     interactive elements with @refs + aria state
-  screenshot <path> [--full] [--scale n] [--max-width n] [--el <sel|@ref>]
+  screenshot <path> [--full] [--scale n] [--max-width n] [--el <sel|@ref> [--pad px]]
   viewport <w> <h> [--dpr n]      real viewport resize — reset with: viewport reset
   eval <js>                       run JavaScript in the page
   get text <sel> | get html <sel>

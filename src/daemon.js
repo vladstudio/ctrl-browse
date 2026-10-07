@@ -849,7 +849,7 @@ async function tabClose(s, ref) {
 // ---------------------------------------------------------------- dispatch
 const USAGE = {
   goto: ['open|goto <url>', 1], open: ['open|goto <url>', 1],
-  screenshot: ['screenshot <path> [--full] [--scale n] [--max-width n] [--el <sel|@ref>]', 1],
+  screenshot: ['screenshot <path> [--full] [--scale n] [--max-width n] [--el <sel|@ref> [--pad px]]', 1],
   click: ['click <selector|@ref> [--force]', 1],
   fill: ['fill <selector> <text>', 2], type: ['type <selector> <text> [--delay ms]', 2],
   press: ['press <key[+mod]>', 1],
@@ -916,23 +916,16 @@ async function dispatch(session, cmd, args, flags) {
     }
     case 'screenshot': {
       const tab = await resolveTab(s)
-      const params = { format: 'png', captureBeyondViewport: !!flags.full }
-      let width // clip width, for --max-width scaling
-      if (flags.el) {
-        const r = await evalJS(s, tab.id, `(() => { const el = ${selExpr(flags.el)}; if (!el) return null; el.scrollIntoView({ block: 'center' }); const b = el.getBoundingClientRect(); return { x: Math.max(0, b.left), y: Math.max(0, b.top), width: b.width, height: b.height } })()`)
-        if (!r) throw new Error(`element not found: ${flags.el}`)
-        params.clip = r; width = r.width
-      } else if (flags.scale || flags['max-width']) {
-        params.clip = flags.full
-          ? await cdp(s, tab.id, 'Page.getLayoutMetrics').then((m) => ({ x: 0, y: 0, width: m.contentSize.width, height: m.contentSize.height }))
-          : await evalJS(s, tab.id, '({ x: 0, y: 0, width: innerWidth, height: innerHeight })')
-        width = params.clip.width
-      }
-      if (width && (flags.scale || flags['max-width'])) {
-        const sc = flags.scale ? parseFloat(flags.scale) : parseFloat(flags['max-width']) / width
-        if (sc > 0) params.clip.scale = Math.min(2, sc) // capped: CDP rejects scale > 2
-      }
-      const shot = await cdp(s, tab.id, 'Page.captureScreenshot', params, 20000)
+      // clip is in document coords; CDP rejects a clip without scale, or scale > 2
+      const r = await evalJS(s, tab.id, flags.el
+        ? `(() => { const el = ${selExpr(flags.el)}; if (!el) return null; el.scrollIntoView({ block: 'center' }); const b = el.getBoundingClientRect(), p = ${parseFloat(flags.pad) || 0}, x = Math.max(0, b.left + scrollX - p), y = Math.max(0, b.top + scrollY - p); return { x, y, width: b.right + scrollX + p - x, height: b.bottom + scrollY + p - y, dpr: devicePixelRatio } })()`
+        : flags.full
+          ? '({ x: 0, y: 0, width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight, dpr: devicePixelRatio })'
+          : '({ x: scrollX, y: scrollY, width: innerWidth, height: innerHeight, dpr: devicePixelRatio })')
+      if (!r) throw new Error(`element not found: ${flags.el}`)
+      const { dpr, ...clip } = r
+      clip.scale = Math.min(2, parseFloat(flags.scale) || 1, parseFloat(flags['max-width']) / (clip.width * dpr) || 1)
+      const shot = await cdp(s, tab.id, 'Page.captureScreenshot', { format: 'png', captureBeyondViewport: !!(flags.full || flags.el), clip }, 20000)
       return { text: 'ok', data: { bytes: shot.data } }
     }
     case 'press': return pressCmd(s, args[0])

@@ -85,7 +85,8 @@ wait --text-gone "Loading…" | wait --gone <sel> | wait --fn "<js expr>" | wait
 dom [--limit n]                    # document HTML
 snapshot                           # page outline with @refs
 snapshot -i                        # interactive elements with @refs + aria state
-screenshot <path> [--full] [--scale n] [--max-width n] [--el <sel|@ref>]
+screenshot <path> [--full] [--scale n] [--max-width n] [--el <sel|@ref> [--pad px]]
+                                   # --el crops to one element, --pad adds context around it; --max-width never upscales
 viewport <w> <h> [--dpr n]         # real viewport resize — undo with: viewport reset
 eval <js>                          # run JS in the page (awaits promises)
 get text <sel> | get html <sel>
